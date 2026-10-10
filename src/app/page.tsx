@@ -69,12 +69,12 @@ function Hero({ onPlay, loggedIn }: { onPlay: () => void; loggedIn: boolean }) {
       <FlutedBackdrop className="-z-10" />
       <div className="mx-auto grid min-h-[calc(100svh-var(--nav-h))] max-w-[1280px] items-center gap-x-14 gap-y-12 px-5 pb-20 pt-10 sm:px-10 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:pb-16 narrow:gap-y-10 narrow:px-4 narrow:pt-8 short:min-h-0">
       <div className="min-w-0">
-        <p className="text-[17px] font-semibold narrow:text-[15px]">Bengü&apos;nün şarkısı, dört oyun, tek şehir</p>
+        <p className="text-[17px] font-semibold narrow:text-[15px]">Dört oyun, tek şehir, arkada şarkı</p>
         <h1 className="display mt-3 whitespace-nowrap text-[clamp(5.6rem,15.5vw,13.5rem)] lg:text-[clamp(5.6rem,11.4vw,11.2rem)] narrow:text-[23vw]">
-          Saygımdan
+          Avare
         </h1>
         <p className="mt-7 max-w-[31rem] text-[clamp(1.05rem,1.45vw,1.25rem)] leading-[1.5] text-muted-ink narrow:mt-5 narrow:text-[16px]">
-          Şarkı döngüde çalarken gökdelenlerin arasında ağ at, gece meydanında drift yap, F-16 ile çatıları sıyır.
+          Görev yok, acele yok: şarkı döngüde çalarken gökdelenlerin arasında ağ at, gece meydanında drift yap, F-16 ile çatıları sıyır.
           Kurulum yok, tarayıcında açılır.
         </p>
         <div className="mt-9 flex flex-wrap items-center gap-3 narrow:mt-7">
@@ -103,9 +103,9 @@ function Hero({ onPlay, loggedIn }: { onPlay: () => void; loggedIn: boolean }) {
             {/* printed on the sleeve, like a single's cover */}
             <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-5 pb-4 pt-16 text-paper">
               <div className="font-display text-[clamp(1.9rem,3.4vw,2.6rem)] font-black leading-[0.9] [font-stretch:62%]">
-                Saygımdan
+                {GAMES[track].title}
               </div>
-              <div className="mt-1 text-[14px] font-medium text-white/80">Bengü</div>
+              <div className="mt-1 text-[14px] font-medium text-white/80">Avare</div>
             </div>
           </div>
           <figcaption className="sr-only">Plak kılıfı: seçili oyunun görüntüsü</figcaption>
@@ -178,7 +178,7 @@ function GamesPinned({ loggedIn }: { loggedIn: boolean }) {
         <div className="mx-auto grid h-full max-w-[1280px] items-center gap-10 px-5 py-16 sm:px-10 lg:grid-cols-[0.8fr_1.35fr] lg:gap-16 lg:py-10 narrow:gap-8 narrow:py-12">
           {/* list */}
           <div>
-            <h2 className="display-2 text-[clamp(2.4rem,4.6vw,4.2rem)]">Dört oyun, tek şarkı.</h2>
+            <h2 className="display-2 text-[clamp(2.4rem,4.6vw,4.2rem)]">Dört oyun, tek şehir.</h2>
             <p className="mt-4 max-w-[26rem] text-[17px] leading-[1.55] text-muted-ink narrow:text-[16px]">
               Hepsi aynı şehirde geçiyor. Şarkı sen oyun değiştirirken de çalmaya devam eder.
             </p>
@@ -336,7 +336,7 @@ function Footer() {
       </div>
       <div aria-hidden className="overflow-hidden">
         <div className="select-none whitespace-nowrap text-center text-[20vw] font-extrabold leading-[0.9] tracking-[-0.07em] text-ink translate-y-[12%]">
-          saygımdan
+          avare
         </div>
       </div>
     </footer>

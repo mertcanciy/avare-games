@@ -15,7 +15,7 @@ export function Wordmark({ className = "" }: { className?: string }) {
         aria-hidden
         className="inline-block size-[0.62em] rounded-full bg-red [background-image:radial-gradient(circle,var(--paper)_0_16%,transparent_18%)] ring-[0.09em] ring-ink"
       />
-      saygımdan
+      avare
     </Link>
   );
 }

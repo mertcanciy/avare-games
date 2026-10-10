@@ -12,6 +12,7 @@ import * as THREE from "three";
 import { useFrame, useThree } from "@react-three/fiber";
 import { useFBO } from "@react-three/drei";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { MUSIC } from "@/lib/music";
 import { buildCar } from "./carGeometry";
 import { carMaterials, makePaint } from "./carMaterials";
 
@@ -130,10 +131,10 @@ function screenTexture(): THREE.CanvasTexture {
   g.fillText("S", 84, 136);
   g.fillStyle = "#f5f6f8";
   g.font = "700 34px system-ui, sans-serif";
-  g.fillText("Saygımdan", 204, 96);
+  g.fillText(MUSIC.title, 204, 96);
   g.fillStyle = "#a6adbb";
   g.font = "500 24px system-ui, sans-serif";
-  g.fillText("Bengü", 204, 134);
+  g.fillText(MUSIC.artist, 204, 134);
   g.fillStyle = "#39404e";
   g.fillRect(204, 170, 270, 6);
   g.fillStyle = "#ffd400";

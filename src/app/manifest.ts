@@ -6,9 +6,9 @@ import type { MetadataRoute } from "next";
 export default function manifest(): MetadataRoute.Manifest {
   return {
     id: "/",
-    name: "Saygımdan",
-    short_name: "Saygımdan",
-    description: "Bengü'nün Saygımdan'ı çalarken şehirde ağ at, drift yap, F-16 ile gökdelenlerin arasından geç.",
+    name: "Avare",
+    short_name: "Avare",
+    description: "Arkada şarkı çalarken şehirde ağ at, drift yap, F-16 ile gökdelenlerin arasından geç. Görev yok, acele yok.",
     lang: "tr",
     dir: "ltr",
     // signed-in players land on the game list; others are sent on to sign in
