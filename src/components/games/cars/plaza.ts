@@ -177,7 +177,7 @@ export function makePlazaMarkings(P: number): THREE.CanvasTexture {
   g.font = `900 ${Math.round(M(3.6))}px system-ui, sans-serif`;
   g.textAlign = "center";
   g.textBaseline = "middle";
-  g.fillText("SAYGIMDAN", 0, 0);
+  g.fillText("AVARE", 0, 0);
   g.restore();
 
   // paint wear

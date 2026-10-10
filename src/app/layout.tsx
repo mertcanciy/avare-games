@@ -25,11 +25,11 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Saygımdan",
-  description: "Bengü'nün Saygımdan'ı çalarken şehirde ağ at, drift yap, F-16 ile gökdelenlerin arasından geç.",
-  applicationName: "Saygımdan",
+  title: "Avare",
+  description: "Arkada şarkı çalarken şehirde ağ at, drift yap, F-16 ile gökdelenlerin arasından geç. Görev yok, acele yok.",
+  applicationName: "Avare",
   // added to the iPhone home screen: opens without Safari's bars (manifest: app/manifest.ts)
-  appleWebApp: { capable: true, title: "Saygımdan", statusBarStyle: "default" },
+  appleWebApp: { capable: true, title: "Avare", statusBarStyle: "default" },
 };
 
 export const viewport: Viewport = {

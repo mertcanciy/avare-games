@@ -8,9 +8,9 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 <!-- END:nextjs-agent-rules -->
 
-# Proje: Saygımdan
+# Proje: Avare
 
-Şarkı çalarken oynanan 4 tarayıcı oyunu. Next.js 16 (App Router), React 19, TypeScript, Tailwind v4, three + @react-three/fiber + drei + @react-three/postprocessing, Zustand. Backend: liderlik tablosu için Next route handler'ları + Upstash Redis (Vercel Marketplace, `KV_REST_API_*`); giriş = kullanıcı adı + şifre (scrypt) ya da Firebase Auth (Google / mail linki); cihazda token.
+Arkada şarkı çalarken görev/acele olmadan oynanan tarayıcı oyunları (şu an 4 oyun, şarkı: Bengü – Saygımdan; ileride başka oyun/şarkı eklenebilir). Site adı şarkıdan bağımsız: şarkı adı sadece çalan şarkı bilgisi (`lib/music.ts`) ve künyede geçer. localStorage anahtarları (`saygimdan-*`) bilerek eski adla kaldı (değiştirmek girişleri ve tercihleri sıfırlar). Next.js 16 (App Router), React 19, TypeScript, Tailwind v4, three + @react-three/fiber + drei + @react-three/postprocessing, Zustand. Backend: liderlik tablosu için Next route handler'ları + Upstash Redis (Vercel Marketplace, `KV_REST_API_*`); giriş = kullanıcı adı + şifre (scrypt) ya da Firebase Auth (Google / mail linki); cihazda token.
 
 ## Komutlar
 - `npm run dev` · `npm run build` · `npm run lint` (test altyapısı yok; doğrulama = lint + build + tarayıcıda deneme)

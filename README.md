@@ -1,6 +1,6 @@
-# Saygımdan
+# Avare
 
-Bengü'nün **Saygımdan** şarkısını sonsuz loop'ta dinlerken kafa dağıtmalık, open‑map tarzı 4 mini oyun.
+Arkada şarkı çalarken görevsiz, kafa dağıtmalık, open‑map tarzı mini oyunlar. Şu an 4 oyun; şarkı Bengü – Saygımdan (resmi YouTube videosu, sadece bilgisayarda görünür oynatıcıyla).
 
 ## Akış
 
@@ -67,4 +67,4 @@ npm run build
 npm run lint
 ```
 
-Müzik için `public/audio/saygimdan.mp3` koyarsan doğrudan `<audio>` kullanılır; yoksa YouTube embed'e düşer (`NEXT_PUBLIC_YOUTUBE_ID` ile video değiştirilebilir).
+Şarkı sadece resmi YouTube videosunun görünür embed'iyle çalar (site ses dosyası barındırmaz); `NEXT_PUBLIC_YOUTUBE_ID` ile video değiştirilebilir.
