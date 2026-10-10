@@ -164,7 +164,7 @@ export function HudModal({
   return (
     <div
       className={cn(
-        "hud-avoid-song pointer-events-none absolute inset-0 flex items-center justify-center",
+        "pointer-events-none absolute inset-0 flex items-center justify-center",
         tone === "danger" ? "bg-[#d92d20]/15" : "bg-white/10"
       )}
     >
@@ -208,7 +208,7 @@ export function HudBar({ label, value, accent }: { label: string; value: number;
 export function HudEdge({ show, text = "Şehrin sınırı. Geri dön." }: { show: boolean; text?: string }) {
   if (!show) return null;
   return (
-    <div className="hud-avoid-song pointer-events-none absolute inset-x-0 top-[34%] flex justify-center px-4 animate-fade-up">
+    <div className="pointer-events-none absolute inset-x-0 top-[34%] flex justify-center px-4 animate-fade-up">
       <span className="flex items-center gap-2.5 rounded-full bg-[#0a0a0a]/90 py-2 pl-2 pr-4 text-[14px] font-semibold text-white phone:gap-2 phone:py-1.5 phone:pl-1.5 phone:pr-3.5 phone:text-[12.5px]">
         <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-full bg-red text-[15px] font-extrabold text-white phone:size-6 phone:text-[13px]">
           !

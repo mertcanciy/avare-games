@@ -285,12 +285,14 @@
 
 /*
  * Song player open in a game (desktop only; SongDock sets data-song-open on
- * <html>): the centred HUD text (hints, banners, Drift's gate arrow, crash
- * cards) moves left of the player in the top-right corner instead of hiding
- * under it. Same layer as the utilities (their !important paddings would win otherwise).
+ * <html>): the centred HUD text in the top band (hints, banners, Drift's gate
+ * arrow) keeps clear of the player in the top-right corner but stays centred:
+ * the same inset on both sides. Same layer as the utilities (their !important
+ * paddings would win otherwise).
  */
 @layer utilities {
   [data-song-open] .hud-avoid-song {
+    padding-left: calc(1rem + 358px + 1rem) !important;
     padding-right: calc(1rem + 358px + 1rem) !important;
   }
 }
