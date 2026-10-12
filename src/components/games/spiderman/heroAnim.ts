@@ -45,6 +45,8 @@ export interface AnimInput {
   dive: boolean;
   /** gliding on the web wings (arms out) */
   glide: boolean;
+  /** charged-jump crouch 0..1 (ground only): knees bent, arms swept back */
+  crouch: number;
   /** desired body up / forward (world, unit) */
   up: THREE.Vector3;
   fwd: THREE.Vector3;
@@ -119,10 +121,12 @@ const LOCO: [number, number, number][] = [
 ];
 /** frozen sample time (fraction) for the "rise" pose */
 const RISE_T = 0.42;
+/** frozen sample time (fraction) of the landing clip: the deepest crouch (charged jump) */
+const CROUCH_T = 0.3;
 
 /* ---------- procedural layers ---------- */
-const L = { swing: 0, flip: 1, spread: 2, dive: 3, aimL: 4, aimR: 5, crawl: 6, zip: 7, thwipL: 8, thwipR: 9, glide: 10 } as const;
-const NL = 11;
+const L = { swing: 0, flip: 1, spread: 2, dive: 3, aimL: 4, aimR: 5, crawl: 6, zip: 7, thwipL: 8, thwipR: 9, glide: 10, crouch: 11 } as const;
+const NL = 12;
 /** metres climbed per full crawl cycle (two hand placements) */
 const CRAWL_CYCLE = 1.35;
 
@@ -327,6 +331,13 @@ export class HeroAnimator {
           this.wt[os] = k;
         }
       }
+      if (inp.crouch > 0.01) {
+        // charging a jump: hold the landing clip at its deepest crouch
+        const k = Math.min(1, inp.crouch);
+        for (let i = 0; i < NC; i++) this.wt[i] *= 1 - k;
+        this.wt[C.land] += k;
+        this.lt[L.crouch] = k;
+      }
     } else if (inp.mode === Mode.WallRun) {
       cycle = this.setLocoTargets(inp.speed);
     } else if (inp.mode === Mode.WallCrawl) {
@@ -399,6 +410,7 @@ export class HeroAnimator {
       if (i === C.walk || i === C.jog || i === C.sprint) a.time = ((this.phase + this.footOff[i]) % 1) * d;
       else if (i === C.rise) a.time = RISE_T * d;
       else if (i === this.oneShot) a.time = Math.min(this.oneShotT, d - 0.01);
+      else if (i === C.land && inp.crouch > 0.01) a.time = CROUCH_T * d;
       else if (i === C.land || i === C.hardLand || i === C.roll) {
         /* fading out after its one-shot: hold */
       } else a.time = this.t % d;
@@ -481,6 +493,20 @@ export class HeroAnimator {
         _dir.copy(U).multiplyScalar(-0.55).addScaledVector(F, -0.8).addScaledVector(S, 0.1 * sg);
         aim(ca, ft, _dir.normalize(), wsp * 0.9);
       }
+    }
+
+    // charged-jump crouch: arms swept back and out like a diver on the board, eyes up
+    const wcj = this.lw[L.crouch];
+    if (wcj > 0.01) {
+      for (let side = 0; side < 2; side++) {
+        const sg = side === 0 ? 1 : -1;
+        _dir.copy(U).multiplyScalar(-0.7).addScaledVector(S, 0.45 * sg).addScaledVector(F, -0.55);
+        aim(side === 0 ? b.upperarm_l : b.upperarm_r, side === 0 ? b.lowerarm_l : b.lowerarm_r, _dir.normalize(), wcj);
+        _dir.copy(U).multiplyScalar(-0.6).addScaledVector(S, 0.3 * sg).addScaledVector(F, -0.75);
+        aim(side === 0 ? b.lowerarm_l : b.lowerarm_r, side === 0 ? b.hand_l : b.hand_r, _dir.normalize(), wcj);
+      }
+      _dir.copy(U).multiplyScalar(0.8).addScaledVector(F, 0.6);
+      aim(b.neck_01, b.Head, _dir.normalize(), wcj * 0.7);
     }
 
     // dive: arms swept back, legs together
