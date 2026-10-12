@@ -26,6 +26,8 @@ export const GAMES: GameInfo[] = [
       { keys: ["W", "A", "S", "D"], label: "koş / havada yönlen / duvarda tırman" },
       { keys: ["Shift"], label: "depar · duvarda koşarak tırman · havada dalış" },
       { keys: ["Space"], label: "duvardayken: duvardan sıçra" },
+      { keys: ["T"], label: "havada numara: W öne takla · S geri takla · A/D burgu · yönsüz takla; üst üste atınca stil çarpanı büyür" },
+      { keys: ["T"], label: "stil puanı ağ, zip, duvar ya da temiz inişle skora eklenir; numara bitmeden yere düşersen yanar" },
       { keys: ["R"], label: "başa dön" },
     ],
     accent: "#e11d48",

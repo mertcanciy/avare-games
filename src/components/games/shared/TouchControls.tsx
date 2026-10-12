@@ -10,7 +10,7 @@
 // clusters), the steering wheel, the floating stick and the throttle lever.
 
 import { useEffect } from "react";
-import { ChevronsDown, ChevronsUp, CircleParking, Flame, Footprints, Lightbulb, Megaphone, Rotate3d, RotateCcw, SwitchCamera, Zap } from "lucide-react";
+import { ChevronsDown, ChevronsUp, CircleParking, Flame, Footprints, Lightbulb, Megaphone, Rotate3d, RotateCcw, Sparkles, SwitchCamera, Zap } from "lucide-react";
 import type { GameSlug } from "@/lib/games";
 import { releaseAllVirtual, virtualKeys, virtualSteer, virtualStick, virtualThrottle } from "./input";
 import { useTouchPrefs } from "./touchPrefs";
@@ -134,7 +134,8 @@ const LAYOUTS: Record<GameSlug, Layout> = {
     left: { kind: "stick", keys: true },
     right: arc({ btn: { code: "Space", label: "Ağ", icon: WebGlyph, aria: "Ağ at (basılı tut, kaydırınca kamera)" }, shape: "round", tone: "primary", w: A, h: A, right: "0px", bottom: "0px", look: true }, [
       { btn: { code: "KeyQ", label: "Zip", icon: Zap }, deg: 180 },
-      { btn: { code: "ShiftLeft", label: "Koş", icon: Footprints }, deg: 100 },
+      { btn: { code: "KeyT", label: "Numara", icon: Sparkles }, deg: 135 },
+      { btn: { code: "ShiftLeft", label: "Koş", icon: Footprints }, deg: 90 },
     ]),
     top: [{ code: "KeyR", label: "Başa dön", icon: RotateCcw, tap: true }],
   },
@@ -193,6 +194,8 @@ export const TOUCH_HELP: Record<GameSlug, string[]> = {
     "Havadayken sol başparmağı yana it: dönersin; Ağ basılıyken kaydırırsan kamera döner",
     "Zip: baktığın yere ağ fırlat, hızla çekil",
     "Koş: yerde depar, duvarda koşarak tırman, havada dalış",
+    "Numara: havadayken takla; sol başparmak ileri = öne takla, geri = geri takla, yana = burgu. Üst üste atınca stil çarpanı büyür",
+    "Stil puanı ağ atınca, zip'leyince, duvara ya da temiz yere inince skora eklenir; numara bitmeden yere düşersen yanar",
   ],
   drift: [
     "Direksiyona dokun, parmağını sağa sola kaydır",
