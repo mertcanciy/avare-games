@@ -27,6 +27,7 @@ import { getGame } from "@/lib/games";
 import { loadHero, PELVIS_HEIGHT, type HeroRig } from "./spiderman/heroModel";
 import { HeroAnimator, Mode, type AnimInput } from "./spiderman/heroAnim";
 import { WebRibbon } from "./spiderman/webLine";
+import { findSlingAnchors, SLING } from "./spiderman/slingshot";
 import { WebSplats } from "./spiderman/webSplat";
 import { facePlane, faceHalf, faceCenterU, nearestFace, volumeAt, type Face } from "./spiderman/wall";
 import { trackScore } from "@/lib/sessionScore";
@@ -129,6 +130,7 @@ interface Hud {
   place: 0 | 1 | 2;
   /** show the wall-controls hint (first few wall visits) */
   wallHint: boolean;
+  slingCharge: number;
 }
 
 interface WallState {
@@ -260,6 +262,7 @@ interface Gfx {
   rig: HeroRig;
   anim: HeroAnimator;
   web: WebRibbon;
+  slingWeb: WebRibbon;
   splats: WebSplats;
   animIn: AnimInput;
 }
@@ -271,6 +274,7 @@ function makeAnimInput(): AnimInput {
     vy: 0,
     impact: 0,
     anchor: null,
+    anchorRight: null,
     hand: 1,
     webT: 0,
     swingPhase: 0.5,
@@ -333,10 +337,12 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
   const solids = useMemo(() => {
     const list: Building[] = [...city.buildings];
     const props = new Set<Building>();
-    const add = (x: number, z: number, w: number, d: number, y0: number, h: number) => {
+    const webFaces = [...city.buildings];
+    const add = (x: number, z: number, w: number, d: number, y0: number, h: number, webFace = false) => {
       const b: Building = { x, z, w, d, y0, h, style: 0, seed: 0, colorIdx: 0, kind: 0, top: true };
       list.push(b);
       props.add(b);
+      if (webFace) webFaces.push(b);
     };
     for (const p of city.hvac) add(p.x, p.z, p.w, p.d, p.y, p.y + p.h);
     for (const p of city.tanks) add(p.x, p.z, p.w * 2, p.d * 2, p.y, p.y + p.h + 0.6);
@@ -345,12 +351,12 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const ph = 1.1;
     for (const b of city.buildings) {
       if (!b.top || b.w <= 6) continue;
-      add(b.x, b.z + b.d / 2 - t / 2, b.w, t, b.h, b.h + ph);
-      add(b.x, b.z - b.d / 2 + t / 2, b.w, t, b.h, b.h + ph);
-      add(b.x + b.w / 2 - t / 2, b.z, t, b.d - t * 2, b.h, b.h + ph);
-      add(b.x - b.w / 2 + t / 2, b.z, t, b.d - t * 2, b.h, b.h + ph);
+      add(b.x, b.z + b.d / 2 - t / 2, b.w, t, b.h, b.h + ph, true);
+      add(b.x, b.z - b.d / 2 + t / 2, b.w, t, b.h, b.h + ph, true);
+      add(b.x + b.w / 2 - t / 2, b.z, t, b.d - t * 2, b.h, b.h + ph, true);
+      add(b.x - b.w / 2 + t / 2, b.z, t, b.d - t * 2, b.h, b.h + ph, true);
     }
-    return { list, props };
+    return { list, props, webFaces };
   }, [city]);
   const ringsRef = useRef<RingData[]>([]);
   useEffect(() => {
@@ -381,8 +387,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           rig.dispose();
           return;
         }
-        g = { rig, anim: new HeroAnimator(rig), web: new WebRibbon(), splats: new WebSplats(), animIn: makeAnimInput() };
-        parent.add(rig.root, g.web.mesh, g.splats.group);
+        g = { rig, anim: new HeroAnimator(rig), web: new WebRibbon(), slingWeb: new WebRibbon(), splats: new WebSplats(), animIn: makeAnimInput() };
+        parent.add(rig.root, g.web.mesh, g.slingWeb.mesh, g.splats.group);
         gfx.current = g;
         warmUp(get);
       })
@@ -390,10 +396,11 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     return () => {
       alive = false;
       if (g) {
-        parent.remove(g.rig.root, g.web.mesh, g.splats.group);
+        parent.remove(g.rig.root, g.web.mesh, g.slingWeb.mesh, g.splats.group);
         g.anim.dispose();
         g.rig.dispose();
         g.web.dispose();
+        g.slingWeb.dispose();
         g.splats.dispose();
       }
       gfx.current = null;
@@ -427,6 +434,11 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     holding: false,
     wall: null as WallState | null,
     zip: null as ZipState | null,
+    sling: {
+      active: false, held: false, t: 0, flight: 0,
+      inputX: 0, inputY: 0,
+      left: new THREE.Vector3(), right: new THREE.Vector3(),
+    },
     /** in-plane climbing direction (crawl body orientation) */
     wallDir: new THREE.Vector3(0, 1, 0),
     wallCool: 0,
@@ -489,6 +501,10 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
   });
 
   // dev-only debug handle for headless tests
+  useEffect(() => {
+    if (!started) st.current.sling.active = false;
+  }, [started]);
+
   useEffect(() => {
     if (process.env.NODE_ENV !== "production") {
       (window as unknown as { __spider?: unknown }).__spider = { st: st.current, city, gfx, get };
@@ -815,6 +831,9 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.holding = false;
     s.wall = null;
     s.zip = null;
+    s.sling.active = false;
+    s.sling.flight = 0;
+    s.sling.held = keys.current.has("KeyC");
     s.combo = 0;
     s.flipT = -1;
     s.visOff.set(0, 0, 0);
@@ -1042,6 +1061,58 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wallCool = 0.1;
   }
 
+  function stepSling(h: number, k: Set<string>) {
+    const s = st.current;
+    const sl = s.sling;
+    const held = k.has("KeyC");
+    const pressed = held && !sl.held;
+    sl.held = held;
+    sl.flight = Math.max(0, sl.flight - h);
+    if (s.onGround || s.wall || s.web || s.zip) sl.flight = 0;
+    const web = k.has("Space") || k.has("KeyE") || mouseDown.current;
+    const valid = s.onGround && !s.wall && !s.web && !s.zip;
+    if (pressed && valid && !web) {
+      _origin.copy(s.pos).setY(s.pos.y + COM_H);
+      if (findSlingAnchors(_origin, s.camYaw, solids.webFaces, solids.list, sl.left, sl.right)) {
+        sl.active = true;
+        sl.t = 0;
+        sl.inputX = s.inX;
+        sl.inputY = s.inY;
+        s.vel.set(0, 0, 0);
+        s.flipT = -1;
+        s.fallSpeed = 0;
+      } else banner("Sapan için iki yanda yakın bina gerek");
+    }
+    if (!sl.active) return false;
+    // A walk already held when charging starts is allowed; a fresh direction cancels.
+    const hardMove = virtualStick.active
+      ? Math.hypot(s.inX, s.inY) > SLING.cancelStick
+      : (s.inX !== 0 && s.inX !== sl.inputX) || (s.inY !== 0 && s.inY !== sl.inputY);
+    if (s.inX === 0) sl.inputX = 0;
+    if (s.inY === 0) sl.inputY = 0;
+    if (!valid || web || hardMove || k.has("ShiftLeft") || k.has("ShiftRight")) {
+      sl.active = false;
+      return false;
+    }
+    s.facing = Math.atan2(-Math.sin(s.camYaw), -Math.cos(s.camYaw));
+    if (!held) {
+      sl.active = false;
+      if (sl.t + 1e-8 < SLING.minCharge) return false;
+      const charge = THREE.MathUtils.clamp((sl.t - SLING.minCharge) / (SLING.maxCharge - SLING.minCharge), 0, 1);
+      const speed = THREE.MathUtils.lerp(SLING.minSpeed, SLING.maxSpeed, charge);
+      const horizontal = speed * Math.cos(SLING.pitch);
+      s.vel.set(-Math.sin(s.camYaw) * horizontal, speed * Math.sin(SLING.pitch), -Math.cos(s.camYaw) * horizontal);
+      s.onGround = false;
+      s.airTime = 0;
+      sl.flight = SLING.layoutTime;
+      s.shake = Math.min(1, s.shake + 0.25);
+      banner("Sapan!");
+    } else {
+      sl.t = Math.min(SLING.maxCharge, sl.t + h);
+    }
+    return true;
+  }
+
   function step(h: number, k: Set<string>) {
     const s = st.current;
     _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
@@ -1053,6 +1124,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.inX = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
       s.inY = (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
     }
+    if (stepSling(h, k)) return;
     // touch, airborne: stick sideways turns (view + path together, see the camera
     // yaw in useFrame) instead of pushing sideways, which read as sliding off
     const carve = touch && virtualStick.active && !s.onGround && !s.wall && !s.zip;
@@ -1347,6 +1419,10 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     if (started) {
       const pressed = wantWeb && !s.prevWant;
       if (!wantWeb) s.webLock = false;
+      if (s.sling.active && wantWeb) {
+        s.sling.active = false;
+        s.webLock = true;
+      }
       if (s.wall) {
         if (pressed) wallJump();
       } else {
@@ -1368,9 +1444,13 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           }
         }
       }
-      if (edge(k, "KeyQ") || rmbPressed) startZip();
+      const zipPressed = edge(k, "KeyQ") || rmbPressed;
+      if (zipPressed && !s.sling.active) startZip();
       if (edge(k, "KeyR")) reset();
       s.prevWant = wantWeb;
+    } else {
+      s.sling.active = false;
+      s.sling.held = k.has("KeyC");
     }
     if (s.bannerT > 0) s.bannerT -= dt;
 
@@ -1395,6 +1475,9 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     if (wl) {
       const out = wl.run ? 0.5 : -0.05;
       _off.set(wl.f.nx * out, COM_H, wl.f.nz * out);
+    } else if (s.sling.active) {
+      const crouch = Math.min(1, s.sling.t / 0.3);
+      _off.set(Math.sin(s.camYaw) * 0.3 * crouch, COM_H - 0.45 * crouch, Math.cos(s.camYaw) * 0.3 * crouch);
     } else _off.set(0, COM_H, 0);
     s.comOff.lerp(_off, 1 - Math.exp(-12 * dt));
     const rp = _rp.copy(s.renderPos).add(s.visOff);
@@ -1407,10 +1490,11 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const w = s.web;
     const z = s.zip;
     if (g) {
-      const { rig, anim, web, animIn, splats } = g;
+      const { rig, anim, web, slingWeb, animIn, splats } = g;
       animIn.speed = hv;
       animIn.vy = s.vel.y;
-      animIn.anchor = w ? w.anchor : z ? z.anchor : null;
+      animIn.anchor = s.sling.active ? s.sling.left : w ? w.anchor : z ? z.anchor : null;
+      animIn.anchorRight = s.sling.active ? s.sling.right : null;
       animIn.hand = w ? w.hand : z ? z.hand : s.lastHand;
       animIn.flip = s.flipT;
       animIn.trick = s.trick;
@@ -1440,6 +1524,11 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         _bodyUp.copy(_up).addScaledVector(_bodyFwd, -_bodyFwd.y).normalize();
         if (_bodyUp.lengthSq() < 0.1) _bodyUp.copy(_hv);
         animIn.orientRate = 8;
+      } else if (s.sling.active) {
+        animIn.mode = Mode.Sling;
+        _bodyUp.copy(_up);
+        _bodyFwd.copy(_hv);
+        animIn.orientRate = 12;
       } else if (s.onGround) {
         animIn.mode = Mode.Ground;
         _bodyUp.copy(_up);
@@ -1455,6 +1544,11 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         const along = _d.dot(_hv);
         animIn.swingPhase = 0.5 + 0.5 * THREE.MathUtils.clamp(along / (0.6 * w.len), -1, 1);
         animIn.orientRate = 7;
+      } else if (s.sling.flight > 0 && !animIn.dive) {
+        animIn.mode = Mode.Layout;
+        _bodyUp.copy(s.vel).normalize();
+        _bodyFwd.copy(_up).addScaledVector(_bodyUp, -_bodyUp.y).normalize();
+        animIn.orientRate = 12;
       } else {
         animIn.mode = Mode.Air;
         let p: number;
@@ -1474,13 +1568,20 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       splats.update(dt);
 
       // ---- web strand (swing rope or zip line) ----
-      const strand = w ? { anchor: w.anchor, hand: w.hand, t: w.t, arrive: w.arrive } : z ? { anchor: z.anchor, hand: z.hand, t: z.t, arrive: z.travel } : null;
-      if (strand) {
+      const strand = w || z;
+      slingWeb.mesh.visible = s.sling.active || primeFrames > 0;
+      if (s.sling.active) {
         web.mesh.visible = true;
-        const extend = Math.min(1, (strand.t + 0.012) / Math.max(0.03, strand.arrive) + (started ? 0 : 1));
-        const slack = Math.max(0, 1 - (strand.t - strand.arrive) / 0.2) * (w ? 1 : 0.4);
+        const extend = Math.min(1, s.sling.t * WEB_SPEED / SLING.range);
+        web.update(anim.palmWorld[0], s.sling.left, camera.position, extend, 0, s.time);
+        slingWeb.update(anim.palmWorld[1], s.sling.right, camera.position, extend, 0, s.time);
+      } else if (strand) {
+        web.mesh.visible = true;
+        const arrive = w ? w.arrive : z!.travel;
+        const extend = Math.min(1, (strand.t + 0.012) / Math.max(0.03, arrive) + (started ? 0 : 1));
+        const slack = Math.max(0, 1 - (strand.t - arrive) / 0.2) * (w ? 1 : 0.4);
         web.update(anim.palmWorld[strand.hand], strand.anchor, camera.position, extend, Math.min(1, slack), s.time);
-        if (strand.t >= strand.arrive && strand.t - dt < strand.arrive) {
+        if (strand.t >= arrive && strand.t - dt < arrive) {
           // impact puff where the strand sticks
           particles.current?.emit(strand.anchor, _tmp2.set(0, 0, 0), { life: 0.4, size: 1.4, color: "#ffffff", grow: 1.2 });
         }
@@ -1490,6 +1591,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         web.update(anim.palmWorld[0], anim.palmWorld[0], camera.position, 0, 0, s.time);
       } else web.mesh.visible = false;
       if (primeFrames > 0) {
+        if (!s.sling.active) slingWeb.update(anim.palmWorld[1], anim.palmWorld[1], camera.position, 0, 0, s.time);
         splats.prime(primeFrames > 1);
         primeFrames--;
       }
@@ -1506,7 +1608,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const lag = _d.length();
     const maxLag = 0.9;
     if (lag > maxLag) s.camSmooth.copy(_com).addScaledVector(_d, (maxLag + (lag - maxLag) * 0.25) / lag);
-    const autoPitch = wl
+    const autoPitch = s.sling.active ? -0.03 : wl
       ? wl.run && s.vel.y > 2
         ? 0.5
         : s.vel.y < -2
@@ -1521,7 +1623,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     }
     const targetPitch = lockedRef.current ? pitchRef.current : autoPitch;
     s.camPitch += (targetPitch - s.camPitch) * (1 - Math.exp(-(manual ? 30 : lockedRef.current ? 12 : 3) * dt));
-    const wantDist = wl ? (wl.run ? 4.8 : 4.3) : 3.9 + Math.min(1.2, speed / 40);
+    const wantDist = s.sling.active ? 5.3 + s.sling.t / SLING.maxCharge : wl ? (wl.run ? 4.8 : 4.3) : 3.9 + Math.min(1.2, speed / 40);
     s.camDist += (wantDist - s.camDist) * (1 - Math.exp(-3 * dt));
     const dist = s.dbgDist || s.camDist;
     const vYaw = s.camYaw + s.dbgYaw;
@@ -1535,9 +1637,10 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     if (volumeAt(_camTarget.x, _camTarget.y, _camTarget.z, city.buildings, 0.25)) {
       _camTarget.copy(s.camSmooth).addScaledVector(_up, 0.55).add(_off);
     }
-    const cp = Math.cos(s.camPitch);
+    const viewPitch = s.sling.active ? s.camPitch * 0.3 : s.camPitch;
+    const cp = Math.cos(viewPitch);
     _camPos
-      .set(Math.sin(vYaw) * cp, -Math.sin(s.camPitch), Math.cos(vYaw) * cp)
+      .set(Math.sin(vYaw) * cp, -Math.sin(viewPitch), Math.cos(vYaw) * cp)
       .multiplyScalar(dist)
       .add(_camTarget);
     if (_camPos.y < 0.6) _camPos.y = 0.6;
@@ -1618,6 +1721,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         edge: s.edge,
         place: s.wall ? 2 : s.onGround ? 0 : 1,
         wallHint: !!s.wall && s.wallVisits <= 3,
+        slingCharge: s.sling.active ? Math.round(s.sling.t / SLING.maxCharge * 100) : -1,
       };
       const o = s.lastHud;
       if (
@@ -1632,7 +1736,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         o.bannerId !== nh.bannerId ||
         o.edge !== nh.edge ||
         o.place !== nh.place ||
-        o.wallHint !== nh.wallHint
+        o.wallHint !== nh.wallHint ||
+        o.slingCharge !== nh.slingCharge
       ) {
         s.lastHud = nh;
         onHud(nh);
@@ -1668,6 +1773,7 @@ export default function Spiderman({ started }: { started: boolean }) {
     edge: false,
     place: 0,
     wallHint: false,
+    slingCharge: -1,
   });
   // the 3D tree must not re-render with every HUD update (≈10×/s)
   const dpr = useCanvasDpr();
@@ -1688,7 +1794,13 @@ export default function Spiderman({ started }: { started: boolean }) {
       </HudStack>
       <HudEdge show={started && hud.edge} />
       {hud.bannerId > 0 && <HudBanner keyId={hud.bannerId} text={hud.bannerText} accent="#0284c7" />}
-      {started && !hud.locked && <HudCenter text="Tıkla: fare ile bak · Space / Sol tık basılı: ağ at · Q / Sağ tık: zip" />}
+      {started && !hud.locked && hud.slingCharge < 0 && <HudCenter text="Tıkla: fare ile bak · Space / Sol tık basılı: ağ at · Q / Sağ tık: zip · C: sapan" />}
+      {started && hud.slingCharge >= 0 && (
+        <HudCenter
+          text={`Sapan %${hud.slingCharge} · ${hud.slingCharge < 17 ? "Hazırlanıyor…" : "Bırak: fırla"} · Yön tuşu / Ağ: iptal`}
+          touchText={`Sapan %${hud.slingCharge} · ${hud.slingCharge < 17 ? "Hazırlanıyor…" : "Bırak: fırla"} · Çubuğu sert it / Ağ: iptal`}
+        />
+      )}
       {started && hud.rings === RING_COUNT && (
         <HudBanner text="Tüm halkalar toplandı!" accent={ACCENT} sub={`Skor ${hud.score}`} />
       )}
@@ -1698,10 +1810,10 @@ export default function Spiderman({ started }: { started: boolean }) {
           touchText="Joystick ile tırman · Koş ile duvarda koş · Ağ ile sıçra"
         />
       )}
-      {started && hud.place === 0 && !hud.attached && hud.height < 2 && hud.speed < 5 && (
+      {started && hud.place === 0 && !hud.attached && hud.slingCharge < 0 && hud.speed < 5 && (
         <HudHint
-          text="Ağ için Space'e basılı tut, bırakınca uçarsın · Binaya doğru koş: tırman"
-          touchText="Ağ tuşuna basılı tut, bırakınca uçarsın · Binaya doğru it: tırman"
+          text="Space basılı: ağ · C basılı, bırak: sapan · Binaya doğru koş: tırman"
+          touchText="Ağ basılı: sallan · Sapan basılı, bırak: fırla · Binaya doğru it: tırman"
         />
       )}
     </div>
