@@ -10,7 +10,7 @@
 // clusters), the steering wheel, the floating stick and the throttle lever.
 
 import { useEffect } from "react";
-import { ChevronsDown, ChevronsUp, CircleParking, Feather, Flame, Footprints, Lightbulb, Megaphone, Rotate3d, RotateCcw, SwitchCamera, Zap } from "lucide-react";
+import { ChevronsDown, ChevronsUp, CircleParking, Feather, Flame, Footprints, Lightbulb, Megaphone, MoveUpRight, Rotate3d, RotateCcw, SwitchCamera, Zap } from "lucide-react";
 import type { GameSlug } from "@/lib/games";
 import { releaseAllVirtual, virtualKeys, virtualSteer, virtualStick, virtualThrottle } from "./input";
 import { useTouchPrefs } from "./touchPrefs";
@@ -134,8 +134,9 @@ const LAYOUTS: Record<GameSlug, Layout> = {
     left: { kind: "stick", keys: true },
     right: arc({ btn: { code: "Space", label: "Ağ", icon: WebGlyph, aria: "Ağ at (basılı tut, kaydırınca kamera; kısa dokun: zıpla)" }, shape: "round", tone: "primary", w: A, h: A, right: "0px", bottom: "0px", look: true, chord: "ShiftLeft" }, [
       { btn: { code: "KeyQ", label: "Zip", icon: Zap }, deg: 180 },
-      { btn: { code: "KeyF", label: "Kanat", icon: Feather }, deg: 135 },
-      { btn: { code: "ShiftLeft", label: "Koş", icon: Footprints }, deg: 90 },
+      { btn: { code: "KeyF", label: "Kanat", icon: Feather }, deg: 148 },
+      { btn: { code: "KeyC", label: "Sapan", icon: MoveUpRight, aria: "Sapan (basılı tut, bırakınca fırla)" }, deg: 116 },
+      { btn: { code: "ShiftLeft", label: "Koş", icon: Footprints }, deg: 84 },
     ]),
     top: [{ code: "KeyR", label: "Başa dön", icon: RotateCcw, tap: true }],
   },
@@ -195,6 +196,7 @@ export const TOUCH_HELP: Record<GameSlug, string[]> = {
     "Havadayken sol başparmağı yana it: dönersin; Ağ basılıyken kaydırırsan kamera döner",
     "Zip: baktığın yere ağ fırlat, hızla çekil",
     "Kanat: havada hızlıyken basılı tut, süzülürsün; çubuk ileri yükselir, geri hızlanır, yana döner",
+    "Sapan: yerde / çatıda basılı tut, bırak fırla (en az 0,25 sn); çubuğu sert it veya Ağ ile iptal",
     "Koş: yerde depar, duvarda koşarak tırman, havada dalış (kanatları kapatır)",
   ],
   drift: [

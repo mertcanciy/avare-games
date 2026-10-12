@@ -19,7 +19,7 @@ import type { BoneName, HeroRig } from "./heroModel";
  * No allocations per frame.
  */
 
-export const Mode = { Ground: 0, Swing: 1, Air: 2, WallCrawl: 3, WallRun: 4, Zip: 5 } as const;
+export const Mode = { Ground: 0, Swing: 1, Air: 2, WallCrawl: 3, WallRun: 4, Zip: 5, Sling: 6, Layout: 7 } as const;
 export type Mode = (typeof Mode)[keyof typeof Mode];
 
 export interface AnimInput {
@@ -32,6 +32,8 @@ export interface AnimInput {
   impact: number;
   /** web anchor (world) while swinging / zip target while zipping */
   anchor: THREE.Vector3 | null;
+  /** second anchor while charging a slingshot */
+  anchorRight: THREE.Vector3 | null;
   /** which hand holds the web: 0 = left, 1 = right */
   hand: 0 | 1;
   /** seconds since the web was fired */
@@ -125,8 +127,8 @@ const RISE_T = 0.42;
 const CROUCH_T = 0.3;
 
 /* ---------- procedural layers ---------- */
-const L = { swing: 0, flip: 1, spread: 2, dive: 3, aimL: 4, aimR: 5, crawl: 6, zip: 7, thwipL: 8, thwipR: 9, glide: 10, crouch: 11 } as const;
-const NL = 12;
+const L = { swing: 0, flip: 1, spread: 2, dive: 3, aimL: 4, aimR: 5, crawl: 6, zip: 7, thwipL: 8, thwipR: 9, glide: 10, crouch: 11, sling: 12, layout: 13 } as const;
+const NL = 14;
 /** metres climbed per full crawl cycle (two hand placements) */
 const CRAWL_CYCLE = 1.35;
 
@@ -295,7 +297,7 @@ export class HeroAnimator {
     this.lt.fill(0);
 
     /* ---------- landing one-shots ---------- */
-    const landed = inp.mode === Mode.Ground && this.prevMode !== Mode.Ground;
+    const landed = inp.mode === Mode.Ground && this.prevMode !== Mode.Ground && this.prevMode !== Mode.Sling;
     if (landed) {
       const imp = inp.impact;
       let clip = -1;
@@ -338,6 +340,14 @@ export class HeroAnimator {
         this.wt[C.land] += k;
         this.lt[L.crouch] = k;
       }
+    } else if (inp.mode === Mode.Sling) {
+      this.wt[C.idle] = 1;
+      this.lt[L.sling] = 1;
+      this.lt[L.aimL] = this.lt[L.aimR] = 1;
+      this.lt[L.thwipL] = this.lt[L.thwipR] = 1;
+    } else if (inp.mode === Mode.Layout) {
+      this.wt[C.air] = 1;
+      this.lt[L.layout] = 1;
     } else if (inp.mode === Mode.WallRun) {
       cycle = this.setLocoTargets(inp.speed);
     } else if (inp.mode === Mode.WallCrawl) {
@@ -649,11 +659,34 @@ export class HeroAnimator {
       }
     }
 
+    // Slingshot crouch, then a long, untucked body on release.
+    const ws = this.lw[L.sling];
+    const wlo = this.lw[L.layout];
+    if (ws > 0.01 || wlo > 0.01) {
+      const weight = Math.min(1, ws + wlo);
+      const crouch = ws / (ws + wlo);
+      for (let side = 0; side < 2; side++) {
+        const left = side === 0;
+        const sg = left ? 1 : -1;
+        _dir.copy(U).multiplyScalar(-1 + crouch * 0.7).addScaledVector(F, crouch * 0.9).addScaledVector(S, 0.12 * sg);
+        aim(left ? b.thigh_l : b.thigh_r, left ? b.calf_l : b.calf_r, _dir.normalize(), weight);
+        _dir.copy(U).multiplyScalar(-1).addScaledVector(F, -crouch * 0.95);
+        aim(left ? b.calf_l : b.calf_r, left ? b.foot_l : b.foot_r, _dir.normalize(), weight);
+        if (wlo > 0.01) {
+          _dir.copy(U).multiplyScalar(-0.8).addScaledVector(S, 0.5 * sg);
+          aim(left ? b.upperarm_l : b.upperarm_r, left ? b.lowerarm_l : b.lowerarm_r, _dir.normalize(), wlo);
+          _dir.copy(U).negate().addScaledVector(S, 0.2 * sg);
+          aim(left ? b.lowerarm_l : b.lowerarm_r, left ? b.hand_l : b.hand_r, _dir.normalize(), wlo);
+        }
+      }
+    }
+
     // web arm: straight line from the shoulder to the anchor, with a short
     // bent-arm anticipation right after firing
     for (let h = 0; h < 2; h++) {
       const wa = this.lw[h === 0 ? L.aimL : L.aimR];
-      if (wa <= 0.01 || !inp.anchor) {
+      const anchor = h === 1 && inp.anchorRight ? inp.anchorRight : inp.anchor;
+      if (wa <= 0.01 || !anchor) {
         for (const k of h === 0 ? AIM_L : AIM_R) sp[k].init = false;
         continue;
       }
@@ -662,7 +695,7 @@ export class HeroAnimator {
       const ha = h === 0 ? b.hand_l : b.hand_r;
       const fi = h === 0 ? b.middle_01_l : b.middle_01_r;
       ua.getWorldPosition(_p0);
-      _dir.copy(inp.anchor).sub(_p0).normalize();
+      _dir.copy(anchor).sub(_p0).normalize();
       const ext = inp.mode === Mode.Swing ? smooth(0.0, 0.16, inp.webT) : 1;
       // anticipation: elbow bent, forearm pointing up the rope
       _dir2.copy(_dir).multiplyScalar(0.6).addScaledVector(F, 0.35).addScaledVector(U, -0.25).normalize();

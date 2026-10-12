@@ -24,6 +24,7 @@ export const GAMES: GameInfo[] = [
       { keys: ["Sol Tık", "Space"], label: "basılı: ağ at ve sallan, bırak: uç · yerde kısa bas: zıpla" },
       { keys: ["Shift", "Space"], label: "yerde dururken basılı tut: çömelip güç topla, bırak: yükseğe sıçra" },
       { keys: ["Q", "Sağ Tık"], label: "zip: baktığın yere ağ fırlat, hızla çekil (basılı tutarsan fırlarsın)" },
+      { keys: ["C"], label: "sapan: yerde / çatıda basılı tut, bırak fırla (0,25–1,5 sn); yön tuşu / Shift / ağ ile iptal" },
       { keys: ["W", "A", "S", "D"], label: "koş / havada yönlen / duvarda tırman" },
       { keys: ["F"], label: "basılı: ağ kanatları — havada hızlıyken süzül (W yüksel, S hızlan, A/D dön)" },
       { keys: ["Shift"], label: "depar · duvarda koşarak tırman · havada dalış (kanatları kapatır)" },
