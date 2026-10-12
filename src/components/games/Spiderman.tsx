@@ -25,7 +25,7 @@ import Particles, { type ParticleHandle } from "./shared/Particles";
 import { HudStack, HudStat, HudCenter, HudBanner, HudHint, HudEdge } from "./shared/GameHud";
 import { getGame } from "@/lib/games";
 import { loadHero, PELVIS_HEIGHT, type HeroRig } from "./spiderman/heroModel";
-import { HeroAnimator, Mode, type AnimInput } from "./spiderman/heroAnim";
+import { HeroAnimator, Mode, Trick, type AnimInput } from "./spiderman/heroAnim";
 import { WebRibbon } from "./spiderman/webLine";
 import { findSlingAnchors, SLING } from "./spiderman/slingshot";
 import { WebSplats } from "./spiderman/webSplat";
@@ -142,6 +142,24 @@ const WING = {
 };
 
 /*
+ * Manual air tricks (T / Numara): a flip in free fall, picked by the stick or
+ * WASD. Each finished trick adds style; the style is banked into the score on a
+ * clean landing, a web, a zip or a wall, and lost by landing mid-trick.
+ */
+const STYLE = {
+  /** seconds per manual trick (the automatic release flip takes 0.8) */
+  duration: 0.7,
+  /** points per trick, indexed by Trick (somersault, corkscrew, front flip, backflip, corkscrew right) */
+  points: [100, 150, 150, 200, 150],
+  /** chain multiplier: ×1, ×1.5, ×2 … up to chainMax */
+  chainStep: 0.5,
+  chainMax: 3,
+  /** stick / key deflection needed to pick a direction (else: plain somersault) */
+  pick: 0.3,
+};
+const chainMult = (n: number) => Math.min(STYLE.chainMax, 1 + STYLE.chainStep * (n - 1));
+
+/*
  * Touch: the right thumb is holding the web button, so the left stick does
  * the steering in the air. Sideways = turn: the view and the direction of
  * travel rotate together (and with them the next anchor), like carving, rather
@@ -208,6 +226,9 @@ interface Hud {
   rings: number;
   score: number;
   combo: number;
+  /** unbanked style points and the current trick chain length */
+  style: number;
+  styleChain: number;
   bannerId: number;
   bannerText: string;
   edge: boolean;
@@ -590,7 +611,14 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     lastHud: null as Hud | null,
     facing: Math.PI, // hero yaw (atan2(x,z)); π → facing -Z
     flipT: -1,
-    trick: 0,
+    trick: Trick.Somersault as Trick,
+    /** flip duration (s): manual tricks are quicker than the automatic release flip */
+    flipDur: 0.8,
+    /** the running flip is a manual trick (scores style, fails on landing) */
+    trickManual: false,
+    /** unbanked style points and the length of the current trick chain */
+    style: 0,
+    styleChain: 0,
     releases: 0,
     lastHand: 1 as 0 | 1,
     camSmooth: new THREE.Vector3(spawn.x, COM_H, spawn.z),
@@ -735,6 +763,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.holding = true;
     s.flipT = -1;
     s.wings = false;
+    bankStyle();
     // launch off the ground so the pendulum engages
     if (s.onGround) {
       _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
@@ -774,9 +803,9 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.releases++;
       if (kk > 0.9 && sp > 22) banner("Tam zamanında!");
       // a trick on a well-timed, strong upward release: somersault / corkscrew, alternating
-      if (kk > 0.6 && s.vel.y > 9 && s.releases % 2 === 1) {
-        s.flipT = 0;
-        s.trick = (s.releases >> 1) % 2;
+      // (never over a manual trick)
+      if (kk > 0.6 && s.vel.y > 9 && s.releases % 2 === 1 && s.flipT < 0) {
+        startFlip((s.releases >> 1) % 2 === 1 ? Trick.Corkscrew : Trick.Somersault, false);
       }
     }
     // strand puff at the hand
@@ -843,6 +872,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wallDir.set(0, 1, 0);
     s.onGround = false;
     s.flipT = -1;
+    bankStyle();
     s.fallSpeed = 0;
     if (vIn > 9) {
       s.shake = Math.min(1, s.shake + vIn / 40);
@@ -874,7 +904,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wall = null;
     s.wallCool = 0.3;
     s.onGround = false;
-    if (run) { s.flipT = 0; s.trick = 0; }
+    if (run) startFlip(Trick.Somersault, false);
     s.facing = Math.atan2(-f.nx, -f.nz);
   };
 
@@ -896,8 +926,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wall = null;
     s.wallCool = 0.4;
     s.webLock = true;
-    s.flipT = 0;
-    s.trick = 0;
+    startFlip(Trick.Somersault, false);
     s.facing = Math.atan2(nx, nz);
   };
 
@@ -961,6 +990,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.wall = null;
       s.onGround = false;
       s.flipT = -1;
+      bankStyle();
       s.zipCool = 0.35;
       const g = gfx.current;
       const n = best.face ? { x: best.face.nx, y: 0, z: best.face.nz } : { x: 0, y: 1, z: 0 };
@@ -973,6 +1003,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.vel.addScaledVector(_d, 14);
       s.vel.y = Math.max(s.vel.y, 0) + 4;
       s.zipCool = 0.8;
+      s.flipT = -1;
+      bankStyle();
       const g = gfx.current;
       if (g) particles.current?.emit(g.anim.palmWorld[s.lastHand], _tmp2.set(0, 0, 0), { life: 0.35, size: 0.9, color: "#ffffff", grow: 2 });
     }
@@ -996,6 +1028,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.flipT = -1;
     s.tapT = -1;
     s.chargeT = -1;
+    s.style = 0;
+    s.styleChain = 0;
     s.visOff.set(0, 0, 0);
     s.camYaw = spawn.yaw;
     s.facing = Math.PI;
@@ -1008,6 +1042,50 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.bannerId++;
     s.bannerText = text;
     s.bannerT = 1.2;
+  };
+
+  /* ---------- air tricks / style ---------- */
+
+  /** Start a flip; manual ones (T / Numara) score style, automatic ones don't. */
+  const startFlip = (trick: Trick, manual: boolean) => {
+    const s = st.current;
+    s.flipT = 0;
+    s.trick = trick;
+    s.trickManual = manual;
+    s.flipDur = manual ? STYLE.duration : 0.8;
+  };
+
+  /** Manual trick: only in free fall, one at a time; the stick / WASD picks the kind. */
+  const startTrick = () => {
+    const s = st.current;
+    if (s.onGround || s.wall || s.web || s.zip || s.flipT >= 0) return;
+    const ax = Math.abs(s.inX);
+    const ay = Math.abs(s.inY);
+    let trick: Trick = Trick.Somersault;
+    if (ay >= ax && ay > STYLE.pick) trick = s.inY > 0 ? Trick.FrontFlip : Trick.BackFlip;
+    else if (ax > STYLE.pick) trick = s.inX > 0 ? Trick.CorkscrewR : Trick.Corkscrew;
+    startFlip(trick, true);
+  };
+
+  /** A manual trick finished in the air: style points, more for each link of the chain. */
+  const trickDone = () => {
+    const s = st.current;
+    s.styleChain++;
+    const mult = chainMult(s.styleChain);
+    const pts = Math.round(STYLE.points[s.trick] * mult);
+    s.style += pts;
+    banner(s.styleChain > 1 ? `+${pts} stil · ×${mult}` : `+${pts} stil`);
+  };
+
+  /** Unbanked style goes into the score (clean landing, web, zip, wall). */
+  const bankStyle = () => {
+    const s = st.current;
+    if (s.style > 0) {
+      s.score += s.style;
+      banner(`Stil +${s.style}!`);
+    }
+    s.style = 0;
+    s.styleChain = 0;
   };
 
   function collectRings() {
@@ -1205,8 +1283,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         // point launch: spring off the perch
         s.vel.set(_d.x * 17, 16, _d.z * 17);
         s.onGround = false;
-        s.flipT = 0;
-        s.trick = 0;
+        startFlip(Trick.Somersault, false);
         banner("Fırla!");
         s.shake = Math.min(1, s.shake + 0.25);
       } else {
@@ -1402,6 +1479,12 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
             }
           }
           s.combo = 0;
+          if (s.flipT >= 0 && s.trickManual) {
+            // down before the trick finished: the unbanked style is gone
+            s.style = 0;
+            s.styleChain = 0;
+            banner("Düştün!");
+          } else bankStyle();
           s.flipT = -1;
         }
         s.onGround = true;
@@ -1691,6 +1774,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       }
       const zipPressed = edge(k, "KeyQ") || rmbPressed;
       if (zipPressed && !s.sling.active) startZip();
+      if (edge(k, "KeyT") && !s.sling.active) startTrick();
       if (edge(k, "KeyR")) reset();
       s.prevWant = wantWeb;
     } else {
@@ -1698,6 +1782,14 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.sling.held = k.has("KeyC");
     }
     if (s.bannerT > 0) s.bannerT -= dt;
+    // (before the physics: a trick that finishes this frame counts before a landing)
+    if (s.flipT >= 0) {
+      s.flipT += dt / s.flipDur;
+      if (s.flipT >= 1) {
+        s.flipT = -1;
+        if (s.trickManual) trickDone();
+      }
+    }
 
     if (started) {
       s.acc += dt;
@@ -1710,10 +1802,6 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     // render state interpolated between the last two physics states (no judder at 120/144 Hz)
     s.renderPos.lerpVectors(s.prevPos, s.pos, started ? s.acc / SUB : 1);
     s.visOff.multiplyScalar(Math.exp(-11 * dt));
-    if (s.flipT >= 0) {
-      s.flipT += dt / 0.8;
-      if (s.flipT >= 1) s.flipT = -1;
-    }
     s.wingT += ((s.wings ? 1 : 0) - s.wingT) * (1 - Math.exp(-(s.wings ? 9 : 14) * dt));
     s.wingBank += ((s.wings ? s.wingSteer * WING.bank : 0) - s.wingBank) * (1 - Math.exp(-5 * dt));
 
@@ -1989,6 +2077,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         rings: s.ringsGot,
         score: s.score,
         combo: s.combo,
+        style: s.style,
+        styleChain: s.styleChain,
         bannerId: s.bannerT > 0 ? s.bannerId : 0,
         bannerText: s.bannerText,
         edge: s.edge,
@@ -2007,6 +2097,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         o.rings !== nh.rings ||
         o.score !== nh.score ||
         o.combo !== nh.combo ||
+        o.style !== nh.style ||
+        o.styleChain !== nh.styleChain ||
         o.bannerId !== nh.bannerId ||
         o.edge !== nh.edge ||
         o.place !== nh.place ||
@@ -2034,6 +2126,13 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
   );
 }
 
+/** Skor tile tag: ring combo and the unbanked style ("×3 kombo · stil 450 ×2") */
+function scoreSub(h: Hud) {
+  const combo = h.combo > 1 ? `×${h.combo} kombo` : "";
+  const style = h.style > 0 ? `stil ${h.style}${h.styleChain > 1 ? ` ×${chainMult(h.styleChain)}` : ""}` : "";
+  return combo && style ? `${combo} · ${style}` : combo || style || undefined;
+}
+
 export default function Spiderman({ started }: { started: boolean }) {
   const [hud, setHud] = useState<Hud>({
     speed: 0,
@@ -2043,6 +2142,8 @@ export default function Spiderman({ started }: { started: boolean }) {
     rings: 0,
     score: 0,
     combo: 0,
+    style: 0,
+    styleChain: 0,
     bannerId: 0,
     bannerText: "",
     edge: false,
@@ -2063,7 +2164,7 @@ export default function Spiderman({ started }: { started: boolean }) {
         {scene}
       </Canvas>
       <HudStack>
-        <HudStat label="Skor" value={`${hud.score}`} accent={ACCENT} sub={hud.combo > 1 ? `×${hud.combo} kombo` : undefined} />
+        <HudStat label="Skor" value={`${hud.score}`} accent={ACCENT} sub={scoreSub(hud)} />
         <HudStat label="Halka" value={`${hud.rings}/${RING_COUNT}`} accent="#0284c7" />
         <HudStat label="Hız" value={`${hud.speed} km/h`} accent="#14141f" />
         <HudStat label="Yükseklik" value={`${hud.height} m`} accent="#6b6880" />

@@ -21,6 +21,9 @@ import type { BoneName, HeroRig } from "./heroModel";
 
 export const Mode = { Ground: 0, Swing: 1, Air: 2, WallCrawl: 3, WallRun: 4, Zip: 5, Sling: 6, Layout: 7 } as const;
 export type Mode = (typeof Mode)[keyof typeof Mode];
+/** air tricks (AnimInput.trick): what the flip rotates about and how the body is held */
+export const Trick = { Somersault: 0, Corkscrew: 1, FrontFlip: 2, BackFlip: 3, CorkscrewR: 4 } as const;
+export type Trick = (typeof Trick)[keyof typeof Trick];
 
 export interface AnimInput {
   mode: Mode;
@@ -42,8 +45,8 @@ export interface AnimInput {
   swingPhase: number;
   /** flip progress 0..1, or <0 when not flipping */
   flip: number;
-  /** which trick the flip is: 0 = front somersault, 1 = corkscrew (twist about the body axis) */
-  trick: number;
+  /** which trick the flip is (Trick): tucked somersault / backflip, corkscrew (twist about the body axis), spread front flip */
+  trick: Trick;
   dive: boolean;
   /** gliding on the web wings (arms out) */
   glide: boolean;
@@ -363,8 +366,12 @@ export class HeroAnimator {
       const rise = smooth(-3, 6, inp.vy);
       this.wt[C.rise] = rise;
       this.wt[C.fall] = 1 - rise;
-      if (inp.flip >= 0) this.lt[L.flip] = 1 - smooth(0.8, 1, inp.flip);
-      else if (inp.dive) this.lt[L.dive] = 1;
+      if (inp.flip >= 0) {
+        // the front flip is done stretched out (star), the others tucked
+        const hold = 1 - smooth(0.8, 1, inp.flip);
+        if (inp.trick === Trick.FrontFlip) this.lt[L.spread] = hold;
+        else this.lt[L.flip] = hold;
+      } else if (inp.dive) this.lt[L.dive] = 1;
       else if (inp.glide) this.lt[L.glide] = 1;
       else this.lt[L.spread] = smooth(9, 22, -inp.vy);
     }
@@ -470,8 +477,9 @@ export class HeroAnimator {
       const e = f < 0.5 ? 4 * f * f * f : 1 - Math.pow(-2 * f + 2, 3) / 2;
       this.flipAngle = e * Math.PI * 2;
     } else this.flipAngle = 0;
-    if (inp.trick === 1) rig.flip.quaternion.setFromAxisAngle(_x.set(0, 1, 0), this.flipAngle);
-    else rig.flip.quaternion.setFromAxisAngle(_x.set(1, 0, 0), this.flipAngle);
+    const tk = inp.trick;
+    if (tk === Trick.Corkscrew || tk === Trick.CorkscrewR) rig.flip.quaternion.setFromAxisAngle(_x.set(0, 1, 0), tk === Trick.CorkscrewR ? -this.flipAngle : this.flipAngle);
+    else rig.flip.quaternion.setFromAxisAngle(_x.set(1, 0, 0), tk === Trick.BackFlip ? -this.flipAngle : this.flipAngle);
     rig.root.updateMatrixWorld(true);
 
     /* ---------- procedural layers ---------- */
@@ -707,7 +715,7 @@ export class HeroAnimator {
 
     // flip: tight tuck (corkscrew: long body, arms crossed on the chest)
     const wfl = this.lw[L.flip];
-    if (wfl > 0.01 && inp.trick === 1) {
+    if (wfl > 0.01 && (inp.trick === Trick.Corkscrew || inp.trick === Trick.CorkscrewR)) {
       for (let side = 0; side < 2; side++) {
         const left = side === 0;
         const sg = left ? 1 : -1;

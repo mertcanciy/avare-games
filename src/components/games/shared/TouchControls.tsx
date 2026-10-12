@@ -10,7 +10,7 @@
 // clusters), the steering wheel, the floating stick and the throttle lever.
 
 import { useEffect } from "react";
-import { ChevronsDown, ChevronsUp, CircleParking, Feather, Flame, Footprints, Lightbulb, Megaphone, MoveUpRight, Rotate3d, RotateCcw, SwitchCamera, Zap } from "lucide-react";
+import { ChevronsDown, ChevronsUp, CircleParking, Feather, Flame, Footprints, Lightbulb, Megaphone, MoveUpRight, Rotate3d, RotateCcw, Sparkles, SwitchCamera, Zap } from "lucide-react";
 import type { GameSlug } from "@/lib/games";
 import { releaseAllVirtual, virtualKeys, virtualSteer, virtualStick, virtualThrottle } from "./input";
 import { useTouchPrefs } from "./touchPrefs";
@@ -141,6 +141,7 @@ const LAYOUTS: Record<GameSlug, Layout> = {
     // fourth button on the arc would overlap its neighbours on a phone
     top: [
       { code: "KeyC", label: "Sapan", icon: MoveUpRight },
+      { code: "KeyT", label: "Numara", icon: Sparkles, tap: true },
       { code: "KeyR", label: "Başa dön", icon: RotateCcw, tap: true },
     ],
   },
@@ -202,6 +203,8 @@ export const TOUCH_HELP: Record<GameSlug, string[]> = {
     "Kanat: havada hızlıyken basılı tut, süzülürsün; çubuk ileri yükselir, geri hızlanır, yana döner",
     "Sapan (üstte): yerde / çatıda basılı tut, bırak fırla (en az 0,25 sn); çubuğu sert it veya Ağ ile iptal",
     "Koş: yerde depar, duvarda koşarak tırman, havada dalış (kanatları kapatır)",
+    "Numara (üstte): havadayken takla; sol başparmak ileri = öne takla, geri = geri takla, yana = burgu. Üst üste atınca stil çarpanı büyür",
+    "Stil puanı ağ atınca, zip'leyince, duvara ya da temiz yere inince skora eklenir; numara bitmeden yere düşersen yanar",
   ],
   drift: [
     "Direksiyona dokun, parmağını sağa sola kaydır",
