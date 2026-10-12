@@ -28,6 +28,7 @@ import { loadHero, PELVIS_HEIGHT, type HeroRig } from "./spiderman/heroModel";
 import { HeroAnimator, Mode, type AnimInput } from "./spiderman/heroAnim";
 import { WebRibbon } from "./spiderman/webLine";
 import { WebSplats } from "./spiderman/webSplat";
+import { WebWings } from "./spiderman/webWings";
 import { facePlane, faceHalf, faceCenterU, nearestFace, volumeAt, type Face } from "./spiderman/wall";
 import { trackScore } from "@/lib/sessionScore";
 
@@ -59,6 +60,39 @@ const WALL_RUN = 15;
 /** web strand flight speed (m/s): the rope only pulls once it has arrived */
 const WEB_SPEED = 240;
 const ZIP_RANGE = 95;
+
+/*
+ * Web wings (Marvel's Spider-Man 2 style glide): hold F in free flight. Lift
+ * replaces gravity with a controlled sink; forward speed is only spent, never
+ * gained, unless the player pitches down. Numbers are m/s, m/s², rad/s.
+ */
+const WING = {
+  /** horizontal speed needed to open the wings */
+  open: 12,
+  /** below this (horizontal) they stall and fold (until the next press) */
+  stall: 10,
+  /** sink rate flying level at speed */
+  sink: 3.5,
+  /** extra sink per m/s under this speed: slow wings carry less */
+  slowRef: 18,
+  slowSink: 0.45,
+  /** how fast the vertical speed settles on its target (1/s) */
+  liftRate: 2.5,
+  /** pitch down (S / stick back) at full input: extra sink, forward acceleration */
+  diveSink: 10,
+  diveAcc: 7,
+  /** pitch up (W / stick forward) at full input: climb, forward deceleration */
+  climb: 8,
+  climbDecel: 5.5,
+  /** top speed from a winged dive */
+  maxSpeed: 44,
+  /** keyboard turn rate at full A/D (touch: the stick's TOUCH.turnRate) */
+  turnRate: 1.1,
+  /** quadratic air drag while gliding (free fall: 0.0016) */
+  drag: 0.001,
+  /** body bank at full steer (rad) */
+  bank: 0.7,
+};
 
 /*
  * Touch: the right thumb is holding the web button, so the left stick does
@@ -261,6 +295,7 @@ interface Gfx {
   anim: HeroAnimator;
   web: WebRibbon;
   splats: WebSplats;
+  wings: WebWings;
   animIn: AnimInput;
 }
 
@@ -277,6 +312,7 @@ function makeAnimInput(): AnimInput {
     flip: -1,
     trick: 0,
     dive: false,
+    glide: false,
     up: new THREE.Vector3(0, 1, 0),
     fwd: new THREE.Vector3(0, 0, -1),
     orientRate: 10,
@@ -381,8 +417,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           rig.dispose();
           return;
         }
-        g = { rig, anim: new HeroAnimator(rig), web: new WebRibbon(), splats: new WebSplats(), animIn: makeAnimInput() };
-        parent.add(rig.root, g.web.mesh, g.splats.group);
+        g = { rig, anim: new HeroAnimator(rig), web: new WebRibbon(), splats: new WebSplats(), wings: new WebWings(), animIn: makeAnimInput() };
+        parent.add(rig.root, g.web.mesh, g.splats.group, g.wings.mesh);
         gfx.current = g;
         warmUp(get);
       })
@@ -390,11 +426,12 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     return () => {
       alive = false;
       if (g) {
-        parent.remove(g.rig.root, g.web.mesh, g.splats.group);
+        parent.remove(g.rig.root, g.web.mesh, g.splats.group, g.wings.mesh);
         g.anim.dispose();
         g.rig.dispose();
         g.web.dispose();
         g.splats.dispose();
+        g.wings.dispose();
       }
       gfx.current = null;
     };
@@ -439,6 +476,15 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     zipCool: 0,
     /** a web needs a fresh press (after a wall jump / zip) */
     webLock: false,
+    /** web wings open (gliding) */
+    wings: false,
+    /** after a stall the wings need a fresh press */
+    wingLock: false,
+    /** steer input while gliding (−1..1, + = right), drives the bank */
+    wingSteer: 0,
+    /** render-only: wings open 0..1 and bank angle (rad), smoothed */
+    wingT: 0,
+    wingBank: 0,
     prevWant: false,
     prevRmb: false,
     onGround: true,
@@ -599,6 +645,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.lastHand = hand;
     s.holding = true;
     s.flipT = -1;
+    s.wings = false;
     // launch off the ground so the pendulum engages
     if (s.onGround) {
       _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
@@ -652,6 +699,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const s = st.current;
     if (s.web) releaseWeb(false);
     s.zip = null;
+    s.wings = false;
     const vIn = -(s.vel.x * nx + s.vel.z * nz);
     const tx = nz;
     const tz = -nx;
@@ -779,6 +827,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       }
     }
     if (s.web) releaseWeb(false);
+    s.wings = false;
     if (best) {
       _right.set(-Math.cos(s.facing), 0, Math.sin(s.facing));
       _d.copy(best.anchor).sub(_origin);
@@ -815,6 +864,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.holding = false;
     s.wall = null;
     s.zip = null;
+    s.wings = false;
     s.combo = 0;
     s.flipT = -1;
     s.visOff.set(0, 0, 0);
@@ -1042,6 +1092,42 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wallCool = 0.1;
   }
 
+  /**
+   * One physics substep on the web wings. The wings carry the weight: gravity
+   * (already applied) is given back and the vertical speed settles on a sink
+   * rate instead. Pitching down steepens the sink and turns height into speed;
+   * pitching up climbs while spending speed (a stall folds the wings, see step).
+   */
+  function stepGlide(h: number, hv: number, carve: boolean) {
+    const s = st.current;
+    const lift = THREE.MathUtils.clamp((hv - 6) / 10, 0, 1);
+    s.vel.y += GRAV * lift * h;
+    const pitch = THREE.MathUtils.clamp(s.inY, -1, 1);
+    let vyT = -WING.sink - Math.max(0, WING.slowRef - hv) * WING.slowSink;
+    _d.copy(s.vel).setY(0);
+    if (hv > 1e-3) _d.divideScalar(hv);
+    if (pitch < 0) {
+      vyT += pitch * WING.diveSink;
+      if (hv < WING.maxSpeed) s.vel.addScaledVector(_d, -pitch * WING.diveAcc * h);
+    } else if (pitch > 0) {
+      const margin = THREE.MathUtils.clamp((hv - WING.stall) / 10, 0, 1);
+      vyT += pitch * WING.climb * margin;
+      s.vel.addScaledVector(_d, -pitch * WING.climbDecel * h);
+    }
+    s.vel.y += (vyT - s.vel.y) * (1 - Math.exp(-WING.liftRate * lift * h));
+    // bank: A/D turn the path (touch: the stick already does, see `carve` in step)
+    const steer = carve ? touchTurn(s.inX) : s.inX;
+    if (!carve && steer !== 0) {
+      const a = -steer * WING.turnRate * h;
+      const c = Math.cos(a);
+      const sn = Math.sin(a);
+      const vx = s.vel.x;
+      s.vel.x = vx * c + s.vel.z * sn;
+      s.vel.z = -vx * sn + s.vel.z * c;
+    }
+    s.wingSteer = steer;
+  }
+
   function step(h: number, k: Set<string>) {
     const s = st.current;
     _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
@@ -1132,6 +1218,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         }
         s.onGround = true;
         s.airTime = 0;
+        s.wings = false;
         s.pos.addScaledVector(s.vel, h);
       } else {
         s.onGround = false;
@@ -1140,7 +1227,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         if (s.pos.y > 170) s.vel.y -= (s.pos.y - 170) * 2 * h; // soft ceiling
         // quadratic air drag
         const sp = s.vel.length();
-        s.vel.multiplyScalar(1 - Math.min(0.5, 0.0016 * sp * h));
+        s.vel.multiplyScalar(1 - Math.min(0.5, (s.wings ? WING.drag : 0.0016) * sp * h));
 
         if (w && s.holding) {
           w.t += h;
@@ -1211,13 +1298,28 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
             }
           }
         } else {
-          // air control
-          s.vel.addScaledVector(_wish, 8 * h);
-          if (sprint) {
-            // dive: trade height for speed
-            s.vel.y -= 20 * h;
-            _d.copy(s.vel).setY(0);
-            if (_d.lengthSq() > 1) s.vel.addScaledVector(_d.normalize(), 7 * h);
+          // web wings: held F in free flight with enough speed. Shift folds them into a
+          // dive; a stall (too slow) folds them until the next press
+          const wantWings = k.has("KeyF") && !sprint;
+          const hv = Math.hypot(s.vel.x, s.vel.z);
+          if (!k.has("KeyF")) s.wingLock = false;
+          if (s.wings && (!wantWings || hv < WING.stall)) {
+            s.wings = false;
+            if (hv < WING.stall) s.wingLock = true;
+          } else if (!s.wings && wantWings && !s.wingLock && hv >= WING.open) {
+            s.wings = true;
+            s.flipT = -1;
+          }
+          if (s.wings) stepGlide(h, hv, carve);
+          else {
+            // air control
+            s.vel.addScaledVector(_wish, 8 * h);
+            if (sprint) {
+              // dive: trade height for speed
+              s.vel.y -= 20 * h;
+              _d.copy(s.vel).setY(0);
+              if (_d.lengthSq() > 1) s.vel.addScaledVector(_d.normalize(), 7 * h);
+            }
           }
           s.pos.addScaledVector(s.vel, h);
         }
@@ -1389,6 +1491,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.flipT += dt / 0.8;
       if (s.flipT >= 1) s.flipT = -1;
     }
+    s.wingT += ((s.wings ? 1 : 0) - s.wingT) * (1 - Math.exp(-(s.wings ? 9 : 14) * dt));
+    s.wingBank += ((s.wings ? s.wingSteer * WING.bank : 0) - s.wingBank) * (1 - Math.exp(-5 * dt));
 
     // ---- centre of mass offset (walls push the body off the plane) ----
     const wl = s.wall;
@@ -1417,6 +1521,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       animIn.impact = s.fallSpeed;
       animIn.webT = w ? w.t : z ? z.t : 0;
       animIn.dive = !s.onGround && !w && !wl && !z && (k.has("ShiftLeft") || k.has("ShiftRight")) && s.vel.y < -4;
+      animIn.glide = s.wings;
       _com.copy(rp).add(s.comOff);
       if (wl) {
         const n = _n.set(wl.f.nx, 0, wl.f.nz);
@@ -1459,19 +1564,27 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         animIn.mode = Mode.Air;
         let p: number;
         if (animIn.dive) p = Math.atan2(hv, s.vel.y);
+        else if (s.wings) p = 1.25 - THREE.MathUtils.clamp(s.vel.y / 12, -0.25, 0.25);
         else if (s.vel.y > 4) p = 0.2;
         else p = THREE.MathUtils.clamp(-s.vel.y / 24, 0, 1) * 1.1;
         const c = Math.cos(p);
         const sn = Math.sin(p);
         _bodyUp.copy(_up).multiplyScalar(c).addScaledVector(_hv, sn);
         _bodyFwd.copy(_hv).multiplyScalar(c).addScaledVector(_up, -sn);
-        animIn.orientRate = 4.5;
+        if (Math.abs(s.wingBank) > 1e-3) {
+          // bank into the turn: roll the body about its travel axis
+          _tmp.crossVectors(_hv, _up);
+          _bodyUp.multiplyScalar(Math.cos(s.wingBank)).addScaledVector(_tmp, Math.sin(s.wingBank));
+          _bodyFwd.addScaledVector(_bodyUp, -_bodyFwd.dot(_bodyUp)).normalize();
+        }
+        animIn.orientRate = s.wings ? 5 : 4.5;
       }
       animIn.up.copy(_bodyUp);
       animIn.fwd.copy(_bodyFwd);
       rig.root.position.copy(_com);
       anim.update(dt, animIn);
       splats.update(dt);
+      g.wings.update(rig, s.wingT, primeFrames > 0);
 
       // ---- web strand (swing rope or zip line) ----
       const strand = w ? { anchor: w.anchor, hand: w.hand, t: w.t, arrive: w.arrive } : z ? { anchor: z.anchor, hand: z.hand, t: z.t, arrive: z.travel } : null;
@@ -1514,14 +1627,16 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           : 0.08
       : s.onGround
         ? -0.14
-        : THREE.MathUtils.clamp(-0.16 + s.vel.y * 0.006, -0.45, 0.05);
+        : s.wings
+          ? -0.07
+          : THREE.MathUtils.clamp(-0.16 + s.vel.y * 0.006, -0.45, 0.05);
     if (lockedRef.current && touchIdle) {
       // touch: drift the drag pitch back towards the automatic framing
       pitchRef.current += (autoPitch - pitchRef.current) * (1 - Math.exp(-1.5 * dt));
     }
     const targetPitch = lockedRef.current ? pitchRef.current : autoPitch;
     s.camPitch += (targetPitch - s.camPitch) * (1 - Math.exp(-(manual ? 30 : lockedRef.current ? 12 : 3) * dt));
-    const wantDist = wl ? (wl.run ? 4.8 : 4.3) : 3.9 + Math.min(1.2, speed / 40);
+    const wantDist = wl ? (wl.run ? 4.8 : 4.3) : 3.9 + Math.min(1.2, speed / 40) + (s.wings ? 1.1 : 0);
     s.camDist += (wantDist - s.camDist) * (1 - Math.exp(-3 * dt));
     const dist = s.dbgDist || s.camDist;
     const vYaw = s.camYaw + s.dbgYaw;
@@ -1585,7 +1700,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     }
     cam.lookAt(_camTarget);
     // roll into the swing
-    let rollT = 0;
+    let rollT = s.wingBank * 0.15;
     if (w) {
       _d.copy(w.anchor).sub(_com);
       rollT = THREE.MathUtils.clamp(-_d.dot(_right) / (w.len + 1), -1, 1) * 0.1;
@@ -1688,7 +1803,7 @@ export default function Spiderman({ started }: { started: boolean }) {
       </HudStack>
       <HudEdge show={started && hud.edge} />
       {hud.bannerId > 0 && <HudBanner keyId={hud.bannerId} text={hud.bannerText} accent="#0284c7" />}
-      {started && !hud.locked && <HudCenter text="Tıkla: fare ile bak · Space / Sol tık basılı: ağ at · Q / Sağ tık: zip" />}
+      {started && !hud.locked && <HudCenter text="Tıkla: fare ile bak · Space / Sol tık basılı: ağ at · Q / Sağ tık: zip · F basılı: kanat" />}
       {started && hud.rings === RING_COUNT && (
         <HudBanner text="Tüm halkalar toplandı!" accent={ACCENT} sub={`Skor ${hud.score}`} />
       )}
