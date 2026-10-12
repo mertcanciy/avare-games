@@ -61,6 +61,31 @@ const WEB_SPEED = 240;
 const ZIP_RANGE = 95;
 
 /*
+ * Camera feel (presentation only, nothing here touches the physics): the field
+ * of view widens with speed, the camera rolls into the rope's sideways pull,
+ * its target hangs back for a moment on an upward release, and it sits lower
+ * and further back at the bottom of the arc.
+ */
+const CAM = {
+  /** base field of view (deg), how much it widens towards SWING_CRUISE, and extra in a dive */
+  fov: 60,
+  fovSpeed: 12,
+  fovDive: 6,
+  /** fov smoothing rate (1/s); the projection matrix is only rebuilt for a change above fovStep (deg) */
+  fovRate: 3,
+  fovStep: 0.05,
+  /** max roll into the rope's lateral pull (rad ≈ 6°) and the pull (m/s²) that reaches it */
+  rollMax: 0.105,
+  rollAccel: 18,
+  /** after an upward release the camera target follows this much slower for hangT seconds */
+  hangT: 0.2,
+  hangSlow: 0.75,
+  /** bottom of the arc at cruise speed: this much further back (m) and lower (rad) */
+  lowDist: 1.0,
+  lowPitch: 0.1,
+} as const;
+
+/*
  * Touch: the right thumb is holding the web button, so the left stick does
  * the steering in the air. Sideways = turn: the view and the direction of
  * travel rotate together (and with them the next anchor), like carving, rather
@@ -228,12 +253,16 @@ function SpeedLines({ speedRef }: { speedRef: React.RefObject<number> }) {
     const im = mesh.current;
     if (!im) return;
     const sp = speedRef.current;
-    const k = Math.min(1, Math.max(0, (sp - 30) / 28));
+    // faint from 12 m/s; density and length ramp up hard above 25 m/s
+    const fast = THREE.MathUtils.smoothstep(sp, 25, 44);
+    const k = THREE.MathUtils.smoothstep(sp, 12, 25) * 0.35 + fast * 0.65;
     const mat = im.material as THREE.MeshBasicMaterial;
-    mat.opacity = k * 0.22;
+    mat.opacity = k * 0.24;
     im.visible = k > 0.01 || primeFrames > 0;
     if (!im.visible) return;
-    const stretch = 1.5 + k * 4;
+    const stretch = 1.2 + k * 2.5 + fast * 4;
+    // density: the rest of the instances collapse to zero size (same draw call, no pixels)
+    const shown = Math.ceil(SL_COUNT * (0.35 + 0.65 * k));
     _lineObj.quaternion.copy(camera.quaternion);
     for (let i = 0; i < SL_COUNT; i++) {
       let z = data[i * 3 + 2] + sp * dt * 0.9;
@@ -241,7 +270,8 @@ function SpeedLines({ speedRef }: { speedRef: React.RefObject<number> }) {
       data[i * 3 + 2] = z;
       _tmp.set(data[i * 3], data[i * 3 + 1], z).applyQuaternion(camera.quaternion);
       _lineObj.position.copy(camera.position).add(_tmp);
-      _lineObj.scale.set(0.012, 0.012, stretch);
+      if (i < shown) _lineObj.scale.set(0.012, 0.012, stretch);
+      else _lineObj.scale.set(0, 0, 0);
       _lineObj.updateMatrix();
       im.setMatrixAt(i, _lineObj.matrix);
     }
@@ -458,6 +488,9 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     camPitch: -0.12,
     camRoll: 0,
     camDist: 4,
+    camFov: CAM.fov,
+    /** seconds left of the camera-target hang after a release */
+    camHang: 0,
     yawOffset: 0,
     wasLocked: false,
     lastHud: null as Hud | null,
@@ -486,6 +519,10 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     dbgYaw: 0,
     /** dev/test only: slow-motion factor (0 = off) */
     dbgTime: 0,
+    /** dev/test only: how many times the projection matrix was rebuilt (fov changes) */
+    projUpdates: 0,
+    /** dev/test only: how far the camera target trails the hero (m) */
+    camLag: 0,
   });
 
   // dev-only debug handle for headless tests
@@ -622,6 +659,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.web = null;
     s.holding = false;
     const sp = s.vel.length();
+    // letting go on the way up: the camera target hangs back for a moment (presentation only)
+    if (s.vel.y > 0) s.camHang = CAM.hangT;
     if (boost && sp > 10) {
       // release boost depends on timing: full when letting go on the way up (flight
       // angle 20°..55°), nothing when still falling — like a real swing release
@@ -1500,12 +1539,20 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const speed = s.vel.length();
     speedRef.current = speed;
     if (!s.camInit) s.camSmooth.copy(_com);
-    s.camSmooth.lerp(_com, 1 - Math.exp(-(s.onGround ? 14 : wl ? 10 : 9) * dt));
+    // release "hang": right after letting go on the way up the target trails for a moment,
+    // so the hero visibly shoots up the frame before the camera catches up
+    if (s.camHang > 0) s.camHang = Math.max(0, s.camHang - dt);
+    const hang = s.camHang / CAM.hangT;
+    s.camSmooth.lerp(_com, 1 - Math.exp(-(s.onGround ? 14 : wl ? 10 : 9) * (1 - CAM.hangSlow * hang) * dt));
     // don't let the smoothed target trail too far behind at high speed (soft limit)
     _d.copy(s.camSmooth).sub(_com);
     const lag = _d.length();
-    const maxLag = 0.9;
+    const maxLag = 0.9 + 2 * hang;
     if (lag > maxLag) s.camSmooth.copy(_com).addScaledVector(_d, (maxLag + (lag - maxLag) * 0.25) / lag);
+    s.camLag = Math.min(lag, maxLag + (lag - maxLag) * 0.25);
+    // bottom of the arc (taut rope near vertical): frame from lower and further back, more so when fast
+    const taut = !!w && w.t >= w.arrive;
+    const low = taut ? THREE.MathUtils.clamp(((w.anchor.y - _com.y) / w.len - 0.55) / 0.45, 0, 1) * Math.min(1, speed / SWING_CRUISE) : 0;
     const autoPitch = wl
       ? wl.run && s.vel.y > 2
         ? 0.5
@@ -1514,14 +1561,14 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           : 0.08
       : s.onGround
         ? -0.14
-        : THREE.MathUtils.clamp(-0.16 + s.vel.y * 0.006, -0.45, 0.05);
+        : THREE.MathUtils.clamp(-0.16 + s.vel.y * 0.006, -0.45, 0.05) + low * CAM.lowPitch;
     if (lockedRef.current && touchIdle) {
       // touch: drift the drag pitch back towards the automatic framing
       pitchRef.current += (autoPitch - pitchRef.current) * (1 - Math.exp(-1.5 * dt));
     }
     const targetPitch = lockedRef.current ? pitchRef.current : autoPitch;
     s.camPitch += (targetPitch - s.camPitch) * (1 - Math.exp(-(manual ? 30 : lockedRef.current ? 12 : 3) * dt));
-    const wantDist = wl ? (wl.run ? 4.8 : 4.3) : 3.9 + Math.min(1.2, speed / 40);
+    const wantDist = wl ? (wl.run ? 4.8 : 4.3) : 3.9 + Math.min(1.2, speed / 40) + low * CAM.lowDist;
     s.camDist += (wantDist - s.camDist) * (1 - Math.exp(-3 * dt));
     const dist = s.dbgDist || s.camDist;
     const vYaw = s.camYaw + s.dbgYaw;
@@ -1584,20 +1631,26 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       camera.position.z = THREE.MathUtils.clamp(camera.position.z, -lim, lim);
     }
     cam.lookAt(_camTarget);
-    // roll into the swing
+    // roll into the rope's sideways pull (centripetal + gravity along the rope); decays in free flight
     let rollT = 0;
-    if (w) {
+    if (taut) {
       _d.copy(w.anchor).sub(_com);
-      rollT = THREE.MathUtils.clamp(-_d.dot(_right) / (w.len + 1), -1, 1) * 0.1;
+      const L = _d.length() || 1;
+      const pull = (speed * speed) / Math.max(4, w.len) + GRAV * Math.max(0, _d.y / L);
+      rollT = THREE.MathUtils.clamp(((-_d.dot(_right) / L) * pull) / CAM.rollAccel, -1, 1) * CAM.rollMax;
     }
-    s.camRoll += (rollT - s.camRoll) * (1 - Math.exp(-3 * dt));
+    s.camRoll += (rollT - s.camRoll) * (1 - Math.exp(-(taut ? 4 : 2.5) * dt));
     cam.rotateZ(s.camRoll);
     cam.getWorldDirection(s.camDir);
-    const targetFov = 60 + Math.min(1, speed / 55) * 14;
-    const nf = cam.fov + (targetFov - cam.fov) * (1 - Math.exp(-3 * dt));
-    if (Math.abs(nf - cam.fov) > 1e-3) {
-      cam.fov = nf;
+    // field of view: wider with speed (towards cruise) and in a dive; the projection
+    // matrix is only rebuilt when the fov actually moved, not every frame
+    const dive = !!g && g.animIn.dive;
+    const targetFov = CAM.fov + THREE.MathUtils.smoothstep(speed, 6, SWING_CRUISE) * CAM.fovSpeed + (dive ? CAM.fovDive : 0);
+    s.camFov += (targetFov - s.camFov) * (1 - Math.exp(-CAM.fovRate * dt));
+    if (Math.abs(s.camFov - cam.fov) > CAM.fovStep) {
+      cam.fov = s.camFov;
       cam.updateProjectionMatrix();
+      s.projUpdates++;
     }
     s.edge = distanceToEdge(s.pos.x, s.pos.z, city) < BOUNDARY_WARN;
 
