@@ -34,7 +34,19 @@ import { trackScore } from "@/lib/sessionScore";
 const ACCENT = getGame("spiderman")!.accent;
 const GRAV = 25;
 const SUB = 1 / 120;
-const MAX_SPEED = 64;
+/** hard speed cap (≈ 187 km/h): only a long dive gets near it */
+const MAX_SPEED = 52;
+/** swing cruise speed (≈ 130 km/h): pumping fades out towards it, extra drag above it */
+const SWING_CRUISE = 36;
+/** pump: tangential push at the bottom of the arc while the player pushes forward (m/s²) */
+const PUMP = 9;
+/** rope reel-in rate towards the safe length (m/s) */
+const REEL = 12;
+/** the hop off the ground into the first swing */
+const GROUND_LAUNCH_UP = 9;
+const GROUND_LAUNCH_FWD = 6;
+/** no building to web above this height (sky anchors only low over the streets) */
+const SKY_ANCHOR_MAX_Y = 90;
 const RING_COUNT = 40;
 /** centre of mass above the feet */
 const COM_H = PELVIS_HEIGHT;
@@ -60,8 +72,6 @@ const TOUCH = {
   /** camera catching up behind the path while the stick turns (keyboard air: 2.2) */
   turnFollow: 4.5,
   deadzone: 0.12,
-  /** forward pull while swinging at full stick (same as holding W on a keyboard) */
-  swingSteer: 7,
   /** camera catching up behind a running hero (keyboard: 1.2) */
   groundFollow: 2.4,
   /** cap on the sideways pull while swinging (m/s², ≈ 4 g) */
@@ -413,7 +423,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     /** interpolated position used for rendering + camera */
     renderPos: new THREE.Vector3(spawn.x, 0, spawn.z),
     vel: new THREE.Vector3(),
-    web: null as { anchor: THREE.Vector3; len: number; maxLen: number; t: number; arrive: number; hand: 0 | 1 } | null,
+    web: null as { anchor: THREE.Vector3; len: number; maxLen: number; t: number; arrive: number; hand: 0 | 1; dx: number; dz: number; still: number } | null,
     holding: false,
     wall: null as WallState | null,
     zip: null as ZipState | null,
@@ -530,17 +540,24 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         if (ahead < 0.25) continue;
         const side = (dx * _right.x + dz * _right.z) / horiz;
         const ropeLen = Math.hypot(horiz, rise);
+        const nn = hitNormal(hit.building, hit.point);
+        // a wall facing us head-on and close is what we would swing into
+        const headOn = Math.max(0, -(nn.x * hx + nn.z * hz)) * Math.max(0, 1 - horiz / 40);
+        // a low anchor on a long rope has to be reeled in a lot (that reel-in is speed we
+        // did not earn, and until it is done the arc dips to the street)
+        const reelNeeded = Math.max(0, ropeLen - (ay - 6 - COM_H) - 3);
         const score =
-          ahead * 26 +
+          ahead * 22 +
           Math.min(rise, 42) * 0.55 -
           Math.abs(horiz - 24) * 0.45 -
           Math.max(0, ropeLen - 70) * 0.8 -
-          Math.abs(yo) * 4 +
-          (hv > 8 || turning ? side * prefer * sideWeight : 0);
+          Math.abs(Math.abs(yo) - 0.3) * 5 -
+          headOn * 14 -
+          reelNeeded * 1.4 +
+          (hv > 8 || turning ? side * prefer * sideWeight : side * prefer * 2);
         if (score > bestScore) {
           bestScore = score;
           _best.set(hit.point.x, ay, hit.point.z);
-          const nn = hitNormal(hit.building, hit.point);
           normal.set(nn.x, nn.y, nn.z);
         }
       }
@@ -550,9 +567,9 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       return true;
     }
     // no building in reach (open sky / high above roofs): forgiving sky anchor
-    if (s.pos.y > 150) return false;
+    if (s.pos.y > SKY_ANCHOR_MAX_Y) return false;
     normal.set(0, 0, 0);
-    out.set(_origin.x + hx * 24, _origin.y + 30, _origin.z + hz * 24);
+    out.set(_origin.x + hx * 24, _origin.y + 26, _origin.z + hz * 24);
     // never let a sky anchor pull the hero out of the play area
     const lim = city.bounds.max - 25;
     out.x = THREE.MathUtils.clamp(out.x, -lim, lim);
@@ -574,15 +591,19 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     _right.set(-Math.cos(s.facing), 0, Math.sin(s.facing));
     _d.copy(anchor).sub(_com);
     const hand: 0 | 1 = _d.dot(_right) > 0 ? 1 : 0;
-    s.web = { anchor, len: dist, maxLen, t: 0, arrive: dist / WEB_SPEED, hand };
+    // travel direction of this swing (for the apex release): velocity, else the camera
+    const hv0 = Math.hypot(s.vel.x, s.vel.z);
+    const dx = hv0 > 3 ? s.vel.x / hv0 : -Math.sin(s.camYaw);
+    const dz = hv0 > 3 ? s.vel.z / hv0 : -Math.cos(s.camYaw);
+    s.web = { anchor, len: dist, maxLen, t: 0, arrive: dist / WEB_SPEED, hand, dx, dz, still: 0 };
     s.lastHand = hand;
     s.holding = true;
     s.flipT = -1;
     // launch off the ground so the pendulum engages
     if (s.onGround) {
       _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
-      s.vel.y = Math.max(s.vel.y, 13);
-      s.vel.addScaledVector(_fwd, 9);
+      s.vel.y = Math.max(s.vel.y, GROUND_LAUNCH_UP);
+      s.vel.addScaledVector(_fwd, GROUND_LAUNCH_FWD);
       s.onGround = false;
     } else if (s.vel.length() < 14) {
       // slow in the air: a small tug towards the anchor
@@ -594,7 +615,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     if (g && _anchorN.lengthSq() > 0.5) g.splats.add(anchor, _anchorN.x, _anchorN.y, _anchorN.z);
   };
 
-  const releaseWeb = (boost = true) => {
+  const releaseWeb = (boost = true, scale = 1) => {
     const s = st.current;
     const w = s.web;
     if (!w) return;
@@ -602,13 +623,20 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.holding = false;
     const sp = s.vel.length();
     if (boost && sp > 10) {
-      // PS4-style release boost: forward along travel + up
-      _d.copy(s.vel).setY(0);
-      if (_d.lengthSq() > 1) s.vel.addScaledVector(_d.normalize(), 3.5);
-      s.vel.y += 6;
+      // release boost depends on timing: full when letting go on the way up (flight
+      // angle 20°..55°), nothing when still falling — like a real swing release
+      const up = s.vel.y / sp;
+      const timing = THREE.MathUtils.clamp((up - 0.08) / 0.26, 0, 1) * (up > 0.82 ? 0.5 : 1);
+      const kk = timing * Math.min(1, sp / 24) * scale;
+      if (kk > 0) {
+        _d.copy(s.vel).setY(0);
+        if (_d.lengthSq() > 1) s.vel.addScaledVector(_d.normalize(), 3 * kk);
+        s.vel.y += 4 * kk;
+      }
       s.releases++;
-      // a trick on a strong upward release: somersault / corkscrew, alternating
-      if (s.vel.y > 9 && s.releases % 2 === 1) {
+      if (kk > 0.9 && sp > 22) banner("Tam zamanında!");
+      // a trick on a well-timed, strong upward release: somersault / corkscrew, alternating
+      if (kk > 0.6 && s.vel.y > 9 && s.releases % 2 === 1) {
         s.flipT = 0;
         s.trick = (s.releases >> 1) % 2;
       }
@@ -1122,16 +1150,26 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           _n.copy(_d).divideScalar(dl || 1); // radial (anchor → hero)
           const taut = w.t >= w.arrive;
           if (taut) {
-            // tangential pump along travel keeps the swing alive
-            _tmp.copy(s.vel).addScaledVector(_n, -s.vel.dot(_n));
-            const tl = _tmp.length();
-            if (tl > 0.5 && sp < 46) s.vel.addScaledVector(_tmp.divideScalar(tl), 7.5 * h);
-            // steer: camera forward (+stick), projected on the tangent plane
-            _tmp2.copy(_fwd).multiplyScalar(6).addScaledVector(_wish, touch ? TOUCH.swingSteer : 7);
-            _tmp2.addScaledVector(_n, -_tmp2.dot(_n));
-            s.vel.addScaledVector(_tmp2, h);
+            // speed comes from the pendulum (gravity). Pushing forward (W / stick) pumps
+            // the swing like a real one: a tangential push, strongest at the bottom of
+            // the arc, fading out towards the cruise speed
+            const push = Math.max(0, s.inY);
+            if (push > 0 && sp < SWING_CRUISE) {
+              _tmp.copy(s.vel).addScaledVector(_n, -s.vel.dot(_n));
+              const tl = _tmp.length();
+              const bottom = Math.max(0, (_n.y - 0.55) / 0.45);
+              if (tl > 0.5 && bottom > 0) s.vel.addScaledVector(_tmp.divideScalar(tl), PUMP * push * bottom * (1 - sp / SWING_CRUISE) * h);
+            }
+            // sideways steering (A/D), projected on the tangent plane
+            if (!carve && s.inX !== 0) {
+              _tmp2.copy(_right).multiplyScalar(s.inX * 7);
+              _tmp2.addScaledVector(_n, -_tmp2.dot(_n));
+              s.vel.addScaledVector(_tmp2, h);
+            }
+            // soft cap: swinging above cruise speed costs energy
+            if (sp > SWING_CRUISE) s.vel.multiplyScalar(1 - Math.min(0.5, (sp - SWING_CRUISE) * 0.25 * h));
             // reel the rope in towards the safe length (lifts you off the street)
-            if (w.len > w.maxLen) w.len = Math.max(w.maxLen, w.len - 26 * h);
+            if (w.len > w.maxLen) w.len = Math.max(w.maxLen, w.len - (REEL + Math.min(12, (w.len - w.maxLen) * 1.5)) * h);
           } else {
             // strand still flying: the rope length follows (no pull yet)
             w.len = Math.max(dl, 1);
@@ -1147,9 +1185,31 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
             s.pos.set(_com.x, _com.y - COM_H, _com.z);
             const vr = s.vel.dot(_d);
             if (vr > 0) s.vel.addScaledVector(_d, -vr);
+            // swing assist: the rope pulls sideways towards the anchor's plane, which
+            // would curve the path into the facade — damp that drift (steering still wins)
+            const lat = -s.vel.x * w.dz + s.vel.z * w.dx;
+            const damp = lat * (1 - Math.exp(-2.5 * h));
+            s.vel.x += damp * w.dz;
+            s.vel.z -= damp * w.dx;
           }
           // swung above the anchor → auto release (keeps the flow going)
           if (_com.y > w.anchor.y - 1.5 && w.t > 0.4) releaseWeb();
+          else if (taut && w.t > w.arrive + 0.3) {
+            // hanging still (touched down, or wedged against a facade): the swing is over,
+            // a fresh press starts the next one
+            w.still = sp < 1.5 ? w.still + h : 0;
+            if ((s.pos.y <= gy + 0.05 && s.vel.y <= 0.5) || w.still > 0.4) {
+              releaseWeb(false);
+              s.webLock = true;
+            } else {
+              // front of the arc, past the anchor: holding on would only swing you back.
+              // Let go on the way up once the rope leans 42° forward (a smaller boost than
+              // a timed release), or when the forward speed is gone
+              const fwdV = s.vel.x * w.dx + s.vel.z * w.dz;
+              const past = (w.anchor.x - s.pos.x) * w.dx + (w.anchor.z - s.pos.z) * w.dz < 0;
+              if (past && ((s.vel.y > 0 && _n.y < 0.74) || fwdV < 0.5)) releaseWeb(fwdV > 4, 0.6);
+            }
+          }
         } else {
           // air control
           s.vel.addScaledVector(_wish, 8 * h);
