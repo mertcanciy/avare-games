@@ -4,7 +4,7 @@ import type { BoneName, HeroRig } from "./heroModel";
 /**
  * Hero animation: mocap clips (AnimationMixer) blended by a continuous state
  * machine, plus procedural layers on top for things no stock clip covers
- * (web-arm aiming, swinging legs, flips, skydive spread, dive).
+ * (web-arm aiming, swinging legs, flips, skydive spread, dive, web-wing glide).
  *
  *  - Base layer: every clip is always "playing"; we drive each action's time
  *    and weight ourselves. Target weights come from the movement state and the
@@ -43,6 +43,8 @@ export interface AnimInput {
   /** which trick the flip is: 0 = front somersault, 1 = corkscrew (twist about the body axis) */
   trick: number;
   dive: boolean;
+  /** gliding on the web wings (arms out) */
+  glide: boolean;
   /** desired body up / forward (world, unit) */
   up: THREE.Vector3;
   fwd: THREE.Vector3;
@@ -119,8 +121,8 @@ const LOCO: [number, number, number][] = [
 const RISE_T = 0.42;
 
 /* ---------- procedural layers ---------- */
-const L = { swing: 0, flip: 1, spread: 2, dive: 3, aimL: 4, aimR: 5, crawl: 6, zip: 7, thwipL: 8, thwipR: 9 } as const;
-const NL = 10;
+const L = { swing: 0, flip: 1, spread: 2, dive: 3, aimL: 4, aimR: 5, crawl: 6, zip: 7, thwipL: 8, thwipR: 9, glide: 10 } as const;
+const NL = 11;
 /** metres climbed per full crawl cycle (two hand placements) */
 const CRAWL_CYCLE = 1.35;
 
@@ -342,6 +344,7 @@ export class HeroAnimator {
       this.wt[C.fall] = 1 - rise;
       if (inp.flip >= 0) this.lt[L.flip] = 1 - smooth(0.8, 1, inp.flip);
       else if (inp.dive) this.lt[L.dive] = 1;
+      else if (inp.glide) this.lt[L.glide] = 1;
       else this.lt[L.spread] = smooth(9, 22, -inp.vy);
     }
     // arm aim towards the anchor (web hand), fingers in the "thwip" shape
@@ -494,6 +497,26 @@ export class HeroAnimator {
         _dir.copy(U).multiplyScalar(-1).addScaledVector(F, -0.3);
         aim(side === 0 ? b.calf_l : b.calf_r, side === 0 ? b.foot_l : b.foot_r, _dir.normalize(), wdv);
       }
+    }
+
+    // web wings: arms straight out to the sides, a little swept back, legs
+    // together with the toes pointed, head up looking along the glide
+    const wgl = this.lw[L.glide];
+    if (wgl > 0.01) {
+      for (let side = 0; side < 2; side++) {
+        const left = side === 0;
+        const sg = left ? 1 : -1;
+        _dir.copy(S).multiplyScalar(0.95 * sg).addScaledVector(U, -0.12).addScaledVector(F, -0.12);
+        aim(left ? b.upperarm_l : b.upperarm_r, left ? b.lowerarm_l : b.lowerarm_r, _dir.normalize(), wgl);
+        _dir.copy(S).multiplyScalar(0.95 * sg).addScaledVector(U, -0.2).addScaledVector(F, -0.08);
+        aim(left ? b.lowerarm_l : b.lowerarm_r, left ? b.hand_l : b.hand_r, _dir.normalize(), wgl);
+        _dir.copy(U).multiplyScalar(-1).addScaledVector(S, 0.08 * sg).addScaledVector(F, -0.06);
+        aim(left ? b.thigh_l : b.thigh_r, left ? b.calf_l : b.calf_r, _dir.normalize(), wgl);
+        _dir.copy(U).multiplyScalar(-1).addScaledVector(F, -0.18);
+        aim(left ? b.calf_l : b.calf_r, left ? b.foot_l : b.foot_r, _dir.normalize(), wgl);
+      }
+      _dir.copy(U).multiplyScalar(0.75).addScaledVector(F, -0.5);
+      aim(b.neck_01, b.Head, _dir.normalize(), wgl * 0.7);
     }
 
     // wall crawl: frog-legged diagonal gait (left hand + right foot, then the
