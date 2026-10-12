@@ -21,7 +21,8 @@ export const GAMES: GameInfo[] = [
       "Gökdelenlerin arasında ağ at, sark, bırak ve tekrar yakala. Binalara tırman, duvarlarda koş. Şehre dağılmış ışık halkalarını topla, hızını koru.",
     goal: "Sokakların üstündeki halkalardan geç. Yere değmeden ne kadar uzun sallanırsan kombo o kadar büyür; duvarlara tırmanıp çatılardan atla.",
     controls: [
-      { keys: ["Sol Tık", "Space"], label: "basılı: ağ at ve sallan, bırak: uç" },
+      { keys: ["Sol Tık", "Space"], label: "basılı: ağ at ve sallan, bırak: uç · yerde kısa bas: zıpla" },
+      { keys: ["Shift", "Space"], label: "yerde dururken basılı tut: çömelip güç topla, bırak: yükseğe sıçra" },
       { keys: ["Q", "Sağ Tık"], label: "zip: baktığın yere ağ fırlat, hızla çekil (basılı tutarsan fırlarsın)" },
       { keys: ["W", "A", "S", "D"], label: "koş / havada yönlen / duvarda tırman" },
       { keys: ["Shift"], label: "depar · duvarda koşarak tırman · havada dalış" },

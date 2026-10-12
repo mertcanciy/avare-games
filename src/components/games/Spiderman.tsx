@@ -45,6 +45,27 @@ const REEL = 12;
 /** the hop off the ground into the first swing */
 const GROUND_LAUNCH_UP = 9;
 const GROUND_LAUNCH_FWD = 6;
+/*
+ * Jump: on the ground / a roof the web button fires the web at once (so a held press
+ * swings exactly as before), but letting go within TAP_WINDOW turns the press into a
+ * plain jump: the web is dropped without a boost, the ground-launch kick along the
+ * camera is taken back and the run speed carries on, plus a small kick the way the
+ * stick points. Apex ≈ JUMP_UP² / 2g ≈ 1.8 m standing (less at a sprint: air drag).
+ */
+const TAP_WINDOW = 0.18;
+const JUMP_UP = 9.5;
+const JUMP_KICK = 3;
+/*
+ * Charged jump: Shift (Koş) + web button on the ground while standing still or
+ * slow. Nothing happens for CHARGE_MIN (a quick chord is still a jump), then the
+ * hero crouches and the charge builds until CHARGE_FULL; release leaps up and
+ * forward along the camera: 12→22 m/s up (apex ≈ 2.9→9.7 m), 4→10 m/s forward.
+ */
+const CHARGE_MIN = 0.35;
+const CHARGE_FULL = 1.2;
+const CHARGE_MAX_SPEED = 4;
+const CHARGE_UP = [12, 22];
+const CHARGE_FWD = [4, 10];
 /** no building to web above this height (sky anchors only low over the streets) */
 const SKY_ANCHOR_MAX_Y = 90;
 const RING_COUNT = 40;
@@ -93,6 +114,11 @@ function touchTurn(x: number) {
   return Math.sign(x) * Math.pow(m, 1.35);
 }
 
+/** charge 0..1 from the seconds Shift + web have been held on the ground */
+function chargeK(t: number) {
+  return THREE.MathUtils.clamp((t - CHARGE_MIN) / (CHARGE_FULL - CHARGE_MIN), 0, 1);
+}
+
 // scratch objects (no per-frame allocation)
 const _d = new THREE.Vector3();
 const _n = new THREE.Vector3();
@@ -129,6 +155,8 @@ interface Hud {
   place: 0 | 1 | 2;
   /** show the wall-controls hint (first few wall visits) */
   wallHint: boolean;
+  /** charged-jump charge 0..1 (0 = hidden) */
+  charge: number;
 }
 
 interface WallState {
@@ -277,6 +305,7 @@ function makeAnimInput(): AnimInput {
     flip: -1,
     trick: 0,
     dive: false,
+    crouch: 0,
     up: new THREE.Vector3(0, 1, 0),
     fwd: new THREE.Vector3(0, 0, -1),
     orientRate: 10,
@@ -439,6 +468,13 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     zipCool: 0,
     /** a web needs a fresh press (after a wall jump / zip) */
     webLock: false,
+    /** seconds since a web was fired from the ground, while a tap could still turn into a jump (−1 = no) */
+    tapT: -1,
+    /** run velocity at that press (a tap jump keeps it instead of the launch kick) */
+    tapVx: 0,
+    tapVz: 0,
+    /** Shift + web held on the ground: seconds so far (−1 = not charging) */
+    chargeT: -1,
     prevWant: false,
     prevRmb: false,
     onGround: true,
@@ -646,6 +682,39 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     if (g) particles.current?.emit(g.anim.palmWorld[w.hand], _tmp2.set(0, 0.5, 0), { life: 0.3, size: 0.5, color: "#ffffff", grow: 1.5 });
   };
 
+  /* ---------- jumps ---------- */
+
+  /** A tap of the web button on the ground: a plain jump (`t` = seconds already airborne since the press). */
+  const jump = (t: number) => {
+    const s = st.current;
+    s.vel.set(s.tapVx + _wish.x * JUMP_KICK, Math.max(s.vel.y, JUMP_UP - GRAV * t), s.tapVz + _wish.z * JUMP_KICK);
+    s.onGround = false;
+    s.flipT = -1;
+    s.combo = 0;
+  };
+
+  /** Release of a charged jump: leap up and forward along the camera, scaled by the charge. */
+  const chargedJump = () => {
+    const s = st.current;
+    const k = chargeK(s.chargeT);
+    s.chargeT = -1;
+    _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
+    const fwd = CHARGE_FWD[0] + (CHARGE_FWD[1] - CHARGE_FWD[0]) * k;
+    s.vel.set(_fwd.x * fwd, CHARGE_UP[0] + (CHARGE_UP[1] - CHARGE_UP[0]) * k, _fwd.z * fwd);
+    s.onGround = false;
+    s.facing = s.camYaw + Math.PI;
+    s.shake = Math.min(1, s.shake + 0.15 + 0.3 * k);
+    if (k > 0.7) {
+      s.flipT = 0;
+      s.trick = 0;
+    }
+    for (let i = 0; i < 10; i++) {
+      const a2 = (i / 10) * Math.PI * 2;
+      _tmp2.set(Math.cos(a2) * 4, 0.8 + k, Math.sin(a2) * 4);
+      dust.current?.emit(_tmp.copy(s.pos).setY(s.pos.y + 0.15), _tmp2, { life: 0.7, size: 1.1, color: "#b9b4ab", grow: 2 });
+    }
+  };
+
   /* ---------- walls ---------- */
 
   const attachWall = (b: Building, nx: number, nz: number) => {
@@ -817,6 +886,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.zip = null;
     s.combo = 0;
     s.flipT = -1;
+    s.tapT = -1;
+    s.chargeT = -1;
     s.visOff.set(0, 0, 0);
     s.camYaw = spawn.yaw;
     s.facing = Math.PI;
@@ -1084,6 +1155,11 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const sprint = k.has("ShiftLeft") || k.has("ShiftRight");
     s.wallCool -= h;
     s.zipCool -= h;
+    if (s.tapT >= 0 && (s.tapT += h) > TAP_WINDOW) s.tapT = -1;
+    if (s.chargeT >= 0) {
+      if (s.onGround && !s.wall && !s.zip) s.chargeT = Math.min(CHARGE_FULL, s.chargeT + h);
+      else s.chargeT = -1;
+    }
 
     if (s.wall) {
       stepWall(h, sprint);
@@ -1102,7 +1178,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       const gy = groundHeightAt(s.pos.x, s.pos.z, s.pos.y, solids.list);
       const grounded = !s.web && s.pos.y <= gy + 0.03 && s.vel.y <= 0.5;
       if (grounded) {
-        const target = _tmp.copy(_wish).multiplyScalar(sprint ? SPRINT : RUN);
+        // charging a jump: plant the feet
+        const target = _tmp.copy(_wish).multiplyScalar(s.chargeT >= 0 ? 0 : sprint ? SPRINT : RUN);
         const a = 1 - Math.exp(-14 * h);
         s.vel.x += (target.x - s.vel.x) * a;
         s.vel.z += (target.z - s.vel.z) * a;
@@ -1349,9 +1426,36 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       if (!wantWeb) s.webLock = false;
       if (s.wall) {
         if (pressed) wallJump();
+      } else if (s.chargeT >= 0) {
+        // charging: the release decides — a quick chord is a jump, a held one a leap
+        if (!wantWeb) {
+          if (s.chargeT >= CHARGE_MIN) chargedJump();
+          else {
+            s.chargeT = -1;
+            jump(0);
+          }
+        }
       } else {
-        if (wantWeb && !s.holding && !s.webLock && !s.zip) attachWeb();
-        if (!wantWeb && s.holding) releaseWeb();
+        if (pressed && s.onGround && !s.webLock && !s.zip) {
+          const sprint = k.has("ShiftLeft") || k.has("ShiftRight");
+          if (sprint && hvel < CHARGE_MAX_SPEED) s.chargeT = 0;
+          else {
+            s.tapVx = s.vel.x;
+            s.tapVz = s.vel.z;
+            attachWeb();
+            if (s.web) s.tapT = 0;
+            else jump(0); // nothing to web (high roof, open sky): just jump
+          }
+        } else if (wantWeb && !s.holding && !s.webLock && !s.zip) attachWeb();
+        if (!wantWeb && s.holding) {
+          if (s.tapT >= 0) {
+            // a tap (still within TAP_WINDOW, so still low): drop the web without a boost and jump instead
+            const t = s.tapT;
+            releaseWeb(false);
+            jump(t);
+          } else releaseWeb();
+          s.tapT = -1;
+        }
         // touch: turning bends the swing until its anchor falls behind; then the next
         // web goes out, on the inside of the turn (findAnchor), not too often
         s.reanchorT -= dt;
@@ -1417,6 +1521,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       animIn.impact = s.fallSpeed;
       animIn.webT = w ? w.t : z ? z.t : 0;
       animIn.dive = !s.onGround && !w && !wl && !z && (k.has("ShiftLeft") || k.has("ShiftRight")) && s.vel.y < -4;
+      animIn.crouch = s.chargeT >= CHARGE_MIN ? 0.7 + 0.3 * chargeK(s.chargeT) : 0;
       _com.copy(rp).add(s.comOff);
       if (wl) {
         const n = _n.set(wl.f.nx, 0, wl.f.nz);
@@ -1618,6 +1723,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         edge: s.edge,
         place: s.wall ? 2 : s.onGround ? 0 : 1,
         wallHint: !!s.wall && s.wallVisits <= 3,
+        charge: s.chargeT >= CHARGE_MIN ? Math.max(0.05, Math.round(chargeK(s.chargeT) * 20) / 20) : 0,
       };
       const o = s.lastHud;
       if (
@@ -1632,7 +1738,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         o.bannerId !== nh.bannerId ||
         o.edge !== nh.edge ||
         o.place !== nh.place ||
-        o.wallHint !== nh.wallHint
+        o.wallHint !== nh.wallHint ||
+        o.charge !== nh.charge
       ) {
         s.lastHud = nh;
         onHud(nh);
@@ -1668,6 +1775,7 @@ export default function Spiderman({ started }: { started: boolean }) {
     edge: false,
     place: 0,
     wallHint: false,
+    charge: 0,
   });
   // the 3D tree must not re-render with every HUD update (≈10×/s)
   const dpr = useCanvasDpr();
@@ -1687,8 +1795,13 @@ export default function Spiderman({ started }: { started: boolean }) {
         <HudStat label="Yükseklik" value={`${hud.height} m`} accent="#6b6880" />
       </HudStack>
       <HudEdge show={started && hud.edge} />
+      {hud.charge > 0 && (
+        <div className="pointer-events-none absolute left-1/2 top-[63%] h-1.5 w-28 -translate-x-1/2 overflow-hidden rounded-full bg-[#0a0a0a]/50 ring-1 ring-white/50">
+          <div className="h-full rounded-full transition-[width] duration-100" style={{ width: `${hud.charge * 100}%`, background: ACCENT }} />
+        </div>
+      )}
       {hud.bannerId > 0 && <HudBanner keyId={hud.bannerId} text={hud.bannerText} accent="#0284c7" />}
-      {started && !hud.locked && <HudCenter text="Tıkla: fare ile bak · Space / Sol tık basılı: ağ at · Q / Sağ tık: zip" />}
+      {started && !hud.locked && <HudCenter text="Tıkla: fare ile bak · Space / Sol tık: basılı ağ at, kısa zıpla · Shift + Space: güçlü sıçra · Q / Sağ tık: zip" />}
       {started && hud.rings === RING_COUNT && (
         <HudBanner text="Tüm halkalar toplandı!" accent={ACCENT} sub={`Skor ${hud.score}`} />
       )}

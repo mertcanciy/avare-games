@@ -132,7 +132,7 @@ function arc(primary: PadItem, rest: { btn: Btn; deg: number }[]): Layout["right
 const LAYOUTS: Record<GameSlug, Layout> = {
   spiderman: {
     left: { kind: "stick", keys: true },
-    right: arc({ btn: { code: "Space", label: "Ağ", icon: WebGlyph, aria: "Ağ at (basılı tut, kaydırınca kamera)" }, shape: "round", tone: "primary", w: A, h: A, right: "0px", bottom: "0px", look: true }, [
+    right: arc({ btn: { code: "Space", label: "Ağ", icon: WebGlyph, aria: "Ağ at (basılı tut, kaydırınca kamera; kısa dokun: zıpla)" }, shape: "round", tone: "primary", w: A, h: A, right: "0px", bottom: "0px", look: true, chord: "ShiftLeft" }, [
       { btn: { code: "KeyQ", label: "Zip", icon: Zap }, deg: 180 },
       { btn: { code: "ShiftLeft", label: "Koş", icon: Footprints }, deg: 100 },
     ]),
@@ -189,7 +189,8 @@ const DRIFT_AUTO_GAS: Layout["right"] = {
 export const TOUCH_HELP: Record<GameSlug, string[]> = {
   spiderman: [
     "Sol başparmak: koş; binaya doğru it: tırman",
-    "Ağ: basılı tut sallan, bırak uç",
+    "Ağ: basılı tut sallan, bırak uç; yerde kısa dokun: zıpla",
+    "Koş + Ağ'ı yerde basılı tut (ya da ikisinin arasına bas): çömelip güç toplar, bırakınca yükseğe sıçrarsın",
     "Havadayken sol başparmağı yana it: dönersin; Ağ basılıyken kaydırırsan kamera döner",
     "Zip: baktığın yere ağ fırlat, hızla çekil",
     "Koş: yerde depar, duvarda koşarak tırman, havada dalış",
