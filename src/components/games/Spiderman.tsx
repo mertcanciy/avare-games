@@ -1477,7 +1477,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       _off.set(wl.f.nx * out, COM_H, wl.f.nz * out);
     } else if (s.sling.active) {
       const crouch = Math.min(1, s.sling.t / 0.3);
-      _off.set(Math.sin(s.camYaw) * 0.3 * crouch, COM_H - 0.45 * crouch, Math.cos(s.camYaw) * 0.3 * crouch);
+      _off.set(Math.sin(s.camYaw) * 0.3 * crouch, COM_H - 0.22 * crouch, Math.cos(s.camYaw) * 0.3 * crouch);
     } else _off.set(0, COM_H, 0);
     s.comOff.lerp(_off, 1 - Math.exp(-12 * dt));
     const rp = _rp.copy(s.renderPos).add(s.visOff);
