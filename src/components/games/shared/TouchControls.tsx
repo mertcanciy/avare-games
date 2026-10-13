@@ -10,7 +10,7 @@
 // clusters), the steering wheel, the floating stick and the throttle lever.
 
 import { useEffect } from "react";
-import { ChevronsDown, ChevronsUp, CircleParking, Flame, Footprints, Lightbulb, Megaphone, Rotate3d, RotateCcw, SwitchCamera, Zap } from "lucide-react";
+import { ChevronsDown, ChevronsUp, CircleParking, Feather, Flame, Footprints, Lightbulb, Megaphone, MoveUpRight, Rotate3d, RotateCcw, Sparkles, SwitchCamera, Zap } from "lucide-react";
 import type { GameSlug } from "@/lib/games";
 import { releaseAllVirtual, virtualKeys, virtualSteer, virtualStick, virtualThrottle } from "./input";
 import { useTouchPrefs } from "./touchPrefs";
@@ -132,11 +132,18 @@ function arc(primary: PadItem, rest: { btn: Btn; deg: number }[]): Layout["right
 const LAYOUTS: Record<GameSlug, Layout> = {
   spiderman: {
     left: { kind: "stick", keys: true },
-    right: arc({ btn: { code: "Space", label: "Ağ", icon: WebGlyph, aria: "Ağ at (basılı tut, kaydırınca kamera)" }, shape: "round", tone: "primary", w: A, h: A, right: "0px", bottom: "0px", look: true }, [
+    right: arc({ btn: { code: "Space", label: "Ağ", icon: WebGlyph, aria: "Ağ at (basılı tut, kaydırınca kamera; kısa dokun: zıpla)" }, shape: "round", tone: "primary", w: A, h: A, right: "0px", bottom: "0px", look: true, chord: "ShiftLeft" }, [
       { btn: { code: "KeyQ", label: "Zip", icon: Zap }, deg: 180 },
-      { btn: { code: "ShiftLeft", label: "Koş", icon: Footprints }, deg: 100 },
+      { btn: { code: "KeyF", label: "Kanat", icon: Feather }, deg: 135 },
+      { btn: { code: "ShiftLeft", label: "Koş", icon: Footprints }, deg: 90 },
     ]),
-    top: [{ code: "KeyR", label: "Başa dön", icon: RotateCcw, tap: true }],
+    // Sapan is a ground move used standing still, so it lives in the top row (hold): a
+    // fourth button on the arc would overlap its neighbours on a phone
+    top: [
+      { code: "KeyC", label: "Sapan", icon: MoveUpRight },
+      { code: "KeyT", label: "Numara", icon: Sparkles, tap: true },
+      { code: "KeyR", label: "Başa dön", icon: RotateCcw, tap: true },
+    ],
   },
   drift: {
     left: { kind: "wheel" },
@@ -189,10 +196,15 @@ const DRIFT_AUTO_GAS: Layout["right"] = {
 export const TOUCH_HELP: Record<GameSlug, string[]> = {
   spiderman: [
     "Sol başparmak: koş; binaya doğru it: tırman",
-    "Ağ: basılı tut sallan, bırak uç",
+    "Ağ: basılı tut sallan, bırak uç; yerde kısa dokun: zıpla",
+    "Koş + Ağ'ı yerde basılı tut (ya da ikisinin arasına bas): çömelip güç toplar, bırakınca yükseğe sıçrarsın",
     "Havadayken sol başparmağı yana it: dönersin; Ağ basılıyken kaydırırsan kamera döner",
     "Zip: baktığın yere ağ fırlat, hızla çekil",
-    "Koş: yerde depar, duvarda koşarak tırman, havada dalış",
+    "Kanat: havada hızlıyken basılı tut, süzülürsün; çubuk ileri yükselir, geri hızlanır, yana döner",
+    "Sapan (üstte): yerde / çatıda basılı tut, bırak fırla (en az 0,25 sn); çubuğu sert it veya Ağ ile iptal",
+    "Koş: yerde depar, duvarda koşarak tırman, havada dalış (kanatları kapatır)",
+    "Numara (üstte): havadayken takla; sol başparmak ileri = öne takla, geri = geri takla, yana = burgu. Üst üste atınca stil çarpanı büyür",
+    "Stil puanı ağ atınca, zip'leyince, duvara ya da temiz yere inince skora eklenir; numara bitmeden yere düşersen yanar",
   ],
   drift: [
     "Direksiyona dokun, parmağını sağa sola kaydır",

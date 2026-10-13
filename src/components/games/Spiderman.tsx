@@ -25,16 +25,51 @@ import Particles, { type ParticleHandle } from "./shared/Particles";
 import { HudStack, HudStat, HudCenter, HudBanner, HudHint, HudEdge } from "./shared/GameHud";
 import { getGame } from "@/lib/games";
 import { loadHero, PELVIS_HEIGHT, type HeroRig } from "./spiderman/heroModel";
-import { HeroAnimator, Mode, type AnimInput } from "./spiderman/heroAnim";
+import { HeroAnimator, Mode, Trick, type AnimInput } from "./spiderman/heroAnim";
 import { WebRibbon } from "./spiderman/webLine";
+import { findSlingAnchors, SLING } from "./spiderman/slingshot";
 import { WebSplats } from "./spiderman/webSplat";
+import { WebWings } from "./spiderman/webWings";
 import { facePlane, faceHalf, faceCenterU, nearestFace, volumeAt, type Face } from "./spiderman/wall";
 import { trackScore } from "@/lib/sessionScore";
 
 const ACCENT = getGame("spiderman")!.accent;
 const GRAV = 25;
 const SUB = 1 / 120;
-const MAX_SPEED = 64;
+/** hard speed cap (≈ 187 km/h): only a long dive gets near it */
+const MAX_SPEED = 52;
+/** swing cruise speed (≈ 130 km/h): pumping fades out towards it, extra drag above it */
+const SWING_CRUISE = 36;
+/** pump: tangential push at the bottom of the arc while the player pushes forward (m/s²) */
+const PUMP = 9;
+/** rope reel-in rate towards the safe length (m/s) */
+const REEL = 12;
+/** the hop off the ground into the first swing */
+const GROUND_LAUNCH_UP = 9;
+const GROUND_LAUNCH_FWD = 6;
+/*
+ * Jump: on the ground / a roof the web button fires the web at once (so a held press
+ * swings exactly as before), but letting go within TAP_WINDOW turns the press into a
+ * plain jump: the web is dropped without a boost, the ground-launch kick along the
+ * camera is taken back and the run speed carries on, plus a small kick the way the
+ * stick points. Apex ≈ JUMP_UP² / 2g ≈ 1.8 m standing (less at a sprint: air drag).
+ */
+const TAP_WINDOW = 0.18;
+const JUMP_UP = 9.5;
+const JUMP_KICK = 3;
+/*
+ * Charged jump: Shift (Koş) + web button on the ground while standing still or
+ * slow. Nothing happens for CHARGE_MIN (a quick chord is still a jump), then the
+ * hero crouches and the charge builds until CHARGE_FULL; release leaps up and
+ * forward along the camera: 12→22 m/s up (apex ≈ 2.9→9.7 m), 4→10 m/s forward.
+ */
+const CHARGE_MIN = 0.35;
+const CHARGE_FULL = 1.2;
+const CHARGE_MAX_SPEED = 4;
+const CHARGE_UP = [12, 22];
+const CHARGE_FWD = [4, 10];
+/** no building to web above this height (sky anchors only low over the streets) */
+const SKY_ANCHOR_MAX_Y = 90;
 const RING_COUNT = 40;
 /** centre of mass above the feet */
 const COM_H = PELVIS_HEIGHT;
@@ -49,6 +84,82 @@ const WEB_SPEED = 240;
 const ZIP_RANGE = 95;
 
 /*
+ * Camera feel (presentation only, nothing here touches the physics): the field
+ * of view widens with speed, the camera rolls into the rope's sideways pull,
+ * its target hangs back for a moment on an upward release, and it sits lower
+ * and further back at the bottom of the arc.
+ */
+const CAM = {
+  /** base field of view (deg), how much it widens towards SWING_CRUISE, and extra in a dive */
+  fov: 60,
+  fovSpeed: 12,
+  fovDive: 6,
+  /** fov smoothing rate (1/s); the projection matrix is only rebuilt for a change above fovStep (deg) */
+  fovRate: 3,
+  fovStep: 0.05,
+  /** max roll into the rope's lateral pull (rad ≈ 6°) and the pull (m/s²) that reaches it */
+  rollMax: 0.105,
+  rollAccel: 18,
+  /** after an upward release the camera target follows this much slower for hangT seconds */
+  hangT: 0.2,
+  hangSlow: 0.75,
+  /** bottom of the arc at cruise speed: this much further back (m) and lower (rad) */
+  lowDist: 1.0,
+  lowPitch: 0.1,
+} as const;
+
+/*
+ * Web wings (Marvel's Spider-Man 2 style glide): hold F in free flight. Lift
+ * replaces gravity with a controlled sink; forward speed is only spent, never
+ * gained, unless the player pitches down. Numbers are m/s, m/s², rad/s.
+ */
+const WING = {
+  /** horizontal speed needed to open the wings */
+  open: 12,
+  /** below this (horizontal) they stall and fold (until the next press) */
+  stall: 10,
+  /** sink rate flying level at speed */
+  sink: 3.5,
+  /** extra sink per m/s under this speed: slow wings carry less */
+  slowRef: 18,
+  slowSink: 0.45,
+  /** how fast the vertical speed settles on its target (1/s) */
+  liftRate: 2.5,
+  /** pitch down (S / stick back) at full input: extra sink, forward acceleration */
+  diveSink: 10,
+  diveAcc: 7,
+  /** pitch up (W / stick forward) at full input: climb, forward deceleration */
+  climb: 8,
+  climbDecel: 5.5,
+  /** top speed from a winged dive */
+  maxSpeed: 44,
+  /** keyboard turn rate at full A/D (touch: the stick's TOUCH.turnRate) */
+  turnRate: 1.1,
+  /** quadratic air drag while gliding (free fall: 0.0016) */
+  drag: 0.001,
+  /** body bank at full steer (rad) */
+  bank: 0.7,
+};
+
+/*
+ * Manual air tricks (T / Numara): a flip in free fall, picked by the stick or
+ * WASD. Each finished trick adds style; the style is banked into the score on a
+ * clean landing, a web, a zip or a wall, and lost by landing mid-trick.
+ */
+const STYLE = {
+  /** seconds per manual trick (the automatic release flip takes 0.8) */
+  duration: 0.7,
+  /** points per trick, indexed by Trick (somersault, corkscrew, front flip, backflip, corkscrew right) */
+  points: [100, 150, 150, 200, 150],
+  /** chain multiplier: ×1, ×1.5, ×2 … up to chainMax */
+  chainStep: 0.5,
+  chainMax: 3,
+  /** stick / key deflection needed to pick a direction (else: plain somersault) */
+  pick: 0.3,
+};
+const chainMult = (n: number) => Math.min(STYLE.chainMax, 1 + STYLE.chainStep * (n - 1));
+
+/*
  * Touch: the right thumb is holding the web button, so the left stick does
  * the steering in the air. Sideways = turn: the view and the direction of
  * travel rotate together (and with them the next anchor), like carving, rather
@@ -60,8 +171,6 @@ const TOUCH = {
   /** camera catching up behind the path while the stick turns (keyboard air: 2.2) */
   turnFollow: 4.5,
   deadzone: 0.12,
-  /** forward pull while swinging at full stick (same as holding W on a keyboard) */
-  swingSteer: 7,
   /** camera catching up behind a running hero (keyboard: 1.2) */
   groundFollow: 2.4,
   /** cap on the sideways pull while swinging (m/s², ≈ 4 g) */
@@ -81,6 +190,11 @@ const TOUCH = {
 function touchTurn(x: number) {
   const m = Math.max(0, Math.abs(x) - TOUCH.deadzone) / (1 - TOUCH.deadzone);
   return Math.sign(x) * Math.pow(m, 1.35);
+}
+
+/** charge 0..1 from the seconds Shift + web have been held on the ground */
+function chargeK(t: number) {
+  return THREE.MathUtils.clamp((t - CHARGE_MIN) / (CHARGE_FULL - CHARGE_MIN), 0, 1);
 }
 
 // scratch objects (no per-frame allocation)
@@ -112,6 +226,9 @@ interface Hud {
   rings: number;
   score: number;
   combo: number;
+  /** unbanked style points and the current trick chain length */
+  style: number;
+  styleChain: number;
   bannerId: number;
   bannerText: string;
   edge: boolean;
@@ -119,6 +236,9 @@ interface Hud {
   place: 0 | 1 | 2;
   /** show the wall-controls hint (first few wall visits) */
   wallHint: boolean;
+  /** charged-jump charge 0..1 (0 = hidden) */
+  charge: number;
+  slingCharge: number;
 }
 
 interface WallState {
@@ -218,12 +338,16 @@ function SpeedLines({ speedRef }: { speedRef: React.RefObject<number> }) {
     const im = mesh.current;
     if (!im) return;
     const sp = speedRef.current;
-    const k = Math.min(1, Math.max(0, (sp - 30) / 28));
+    // faint from 12 m/s; density and length ramp up hard above 25 m/s
+    const fast = THREE.MathUtils.smoothstep(sp, 25, 44);
+    const k = THREE.MathUtils.smoothstep(sp, 12, 25) * 0.35 + fast * 0.65;
     const mat = im.material as THREE.MeshBasicMaterial;
-    mat.opacity = k * 0.22;
+    mat.opacity = k * 0.24;
     im.visible = k > 0.01 || primeFrames > 0;
     if (!im.visible) return;
-    const stretch = 1.5 + k * 4;
+    const stretch = 1.2 + k * 2.5 + fast * 4;
+    // density: the rest of the instances collapse to zero size (same draw call, no pixels)
+    const shown = Math.ceil(SL_COUNT * (0.35 + 0.65 * k));
     _lineObj.quaternion.copy(camera.quaternion);
     for (let i = 0; i < SL_COUNT; i++) {
       let z = data[i * 3 + 2] + sp * dt * 0.9;
@@ -231,7 +355,8 @@ function SpeedLines({ speedRef }: { speedRef: React.RefObject<number> }) {
       data[i * 3 + 2] = z;
       _tmp.set(data[i * 3], data[i * 3 + 1], z).applyQuaternion(camera.quaternion);
       _lineObj.position.copy(camera.position).add(_tmp);
-      _lineObj.scale.set(0.012, 0.012, stretch);
+      if (i < shown) _lineObj.scale.set(0.012, 0.012, stretch);
+      else _lineObj.scale.set(0, 0, 0);
       _lineObj.updateMatrix();
       im.setMatrixAt(i, _lineObj.matrix);
     }
@@ -250,7 +375,9 @@ interface Gfx {
   rig: HeroRig;
   anim: HeroAnimator;
   web: WebRibbon;
+  slingWeb: WebRibbon;
   splats: WebSplats;
+  wings: WebWings;
   animIn: AnimInput;
 }
 
@@ -261,12 +388,15 @@ function makeAnimInput(): AnimInput {
     vy: 0,
     impact: 0,
     anchor: null,
+    anchorRight: null,
     hand: 1,
     webT: 0,
     swingPhase: 0.5,
     flip: -1,
     trick: 0,
     dive: false,
+    glide: false,
+    crouch: 0,
     up: new THREE.Vector3(0, 1, 0),
     fwd: new THREE.Vector3(0, 0, -1),
     orientRate: 10,
@@ -323,10 +453,12 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
   const solids = useMemo(() => {
     const list: Building[] = [...city.buildings];
     const props = new Set<Building>();
-    const add = (x: number, z: number, w: number, d: number, y0: number, h: number) => {
+    const webFaces = [...city.buildings];
+    const add = (x: number, z: number, w: number, d: number, y0: number, h: number, webFace = false) => {
       const b: Building = { x, z, w, d, y0, h, style: 0, seed: 0, colorIdx: 0, kind: 0, top: true };
       list.push(b);
       props.add(b);
+      if (webFace) webFaces.push(b);
     };
     for (const p of city.hvac) add(p.x, p.z, p.w, p.d, p.y, p.y + p.h);
     for (const p of city.tanks) add(p.x, p.z, p.w * 2, p.d * 2, p.y, p.y + p.h + 0.6);
@@ -335,12 +467,12 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const ph = 1.1;
     for (const b of city.buildings) {
       if (!b.top || b.w <= 6) continue;
-      add(b.x, b.z + b.d / 2 - t / 2, b.w, t, b.h, b.h + ph);
-      add(b.x, b.z - b.d / 2 + t / 2, b.w, t, b.h, b.h + ph);
-      add(b.x + b.w / 2 - t / 2, b.z, t, b.d - t * 2, b.h, b.h + ph);
-      add(b.x - b.w / 2 + t / 2, b.z, t, b.d - t * 2, b.h, b.h + ph);
+      add(b.x, b.z + b.d / 2 - t / 2, b.w, t, b.h, b.h + ph, true);
+      add(b.x, b.z - b.d / 2 + t / 2, b.w, t, b.h, b.h + ph, true);
+      add(b.x + b.w / 2 - t / 2, b.z, t, b.d - t * 2, b.h, b.h + ph, true);
+      add(b.x - b.w / 2 + t / 2, b.z, t, b.d - t * 2, b.h, b.h + ph, true);
     }
-    return { list, props };
+    return { list, props, webFaces };
   }, [city]);
   const ringsRef = useRef<RingData[]>([]);
   useEffect(() => {
@@ -371,8 +503,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           rig.dispose();
           return;
         }
-        g = { rig, anim: new HeroAnimator(rig), web: new WebRibbon(), splats: new WebSplats(), animIn: makeAnimInput() };
-        parent.add(rig.root, g.web.mesh, g.splats.group);
+        g = { rig, anim: new HeroAnimator(rig), web: new WebRibbon(), slingWeb: new WebRibbon(), splats: new WebSplats(), wings: new WebWings(), animIn: makeAnimInput() };
+        parent.add(rig.root, g.web.mesh, g.slingWeb.mesh, g.splats.group, g.wings.mesh);
         gfx.current = g;
         warmUp(get);
       })
@@ -380,11 +512,13 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     return () => {
       alive = false;
       if (g) {
-        parent.remove(g.rig.root, g.web.mesh, g.splats.group);
+        parent.remove(g.rig.root, g.web.mesh, g.slingWeb.mesh, g.splats.group, g.wings.mesh);
         g.anim.dispose();
         g.rig.dispose();
         g.web.dispose();
+        g.slingWeb.dispose();
         g.splats.dispose();
+        g.wings.dispose();
       }
       gfx.current = null;
     };
@@ -413,10 +547,15 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     /** interpolated position used for rendering + camera */
     renderPos: new THREE.Vector3(spawn.x, 0, spawn.z),
     vel: new THREE.Vector3(),
-    web: null as { anchor: THREE.Vector3; len: number; maxLen: number; t: number; arrive: number; hand: 0 | 1 } | null,
+    web: null as { anchor: THREE.Vector3; len: number; maxLen: number; t: number; arrive: number; hand: 0 | 1; dx: number; dz: number; still: number } | null,
     holding: false,
     wall: null as WallState | null,
     zip: null as ZipState | null,
+    sling: {
+      active: false, held: false, t: 0, flight: 0,
+      inputX: 0, inputY: 0,
+      left: new THREE.Vector3(), right: new THREE.Vector3(),
+    },
     /** in-plane climbing direction (crawl body orientation) */
     wallDir: new THREE.Vector3(0, 1, 0),
     wallCool: 0,
@@ -429,6 +568,22 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     zipCool: 0,
     /** a web needs a fresh press (after a wall jump / zip) */
     webLock: false,
+    /** web wings open (gliding) */
+    wings: false,
+    /** after a stall the wings need a fresh press */
+    wingLock: false,
+    /** steer input while gliding (−1..1, + = right), drives the bank */
+    wingSteer: 0,
+    /** render-only: wings open 0..1 and bank angle (rad), smoothed */
+    wingT: 0,
+    wingBank: 0,
+    /** seconds since a web was fired from the ground, while a tap could still turn into a jump (−1 = no) */
+    tapT: -1,
+    /** run velocity at that press (a tap jump keeps it instead of the launch kick) */
+    tapVx: 0,
+    tapVz: 0,
+    /** Shift + web held on the ground: seconds so far (−1 = not charging) */
+    chargeT: -1,
     prevWant: false,
     prevRmb: false,
     onGround: true,
@@ -448,12 +603,22 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     camPitch: -0.12,
     camRoll: 0,
     camDist: 4,
+    camFov: CAM.fov,
+    /** seconds left of the camera-target hang after a release */
+    camHang: 0,
     yawOffset: 0,
     wasLocked: false,
     lastHud: null as Hud | null,
     facing: Math.PI, // hero yaw (atan2(x,z)); π → facing -Z
     flipT: -1,
-    trick: 0,
+    trick: Trick.Somersault as Trick,
+    /** flip duration (s): manual tricks are quicker than the automatic release flip */
+    flipDur: 0.8,
+    /** the running flip is a manual trick (scores style, fails on landing) */
+    trickManual: false,
+    /** unbanked style points and the length of the current trick chain */
+    style: 0,
+    styleChain: 0,
     releases: 0,
     lastHand: 1 as 0 | 1,
     camSmooth: new THREE.Vector3(spawn.x, COM_H, spawn.z),
@@ -476,9 +641,17 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     dbgYaw: 0,
     /** dev/test only: slow-motion factor (0 = off) */
     dbgTime: 0,
+    /** dev/test only: how many times the projection matrix was rebuilt (fov changes) */
+    projUpdates: 0,
+    /** dev/test only: how far the camera target trails the hero (m) */
+    camLag: 0,
   });
 
   // dev-only debug handle for headless tests
+  useEffect(() => {
+    if (!started) st.current.sling.active = false;
+  }, [started]);
+
   useEffect(() => {
     if (process.env.NODE_ENV !== "production") {
       (window as unknown as { __spider?: unknown }).__spider = { st: st.current, city, gfx, get };
@@ -530,17 +703,24 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         if (ahead < 0.25) continue;
         const side = (dx * _right.x + dz * _right.z) / horiz;
         const ropeLen = Math.hypot(horiz, rise);
+        const nn = hitNormal(hit.building, hit.point);
+        // a wall facing us head-on and close is what we would swing into
+        const headOn = Math.max(0, -(nn.x * hx + nn.z * hz)) * Math.max(0, 1 - horiz / 40);
+        // a low anchor on a long rope has to be reeled in a lot (that reel-in is speed we
+        // did not earn, and until it is done the arc dips to the street)
+        const reelNeeded = Math.max(0, ropeLen - (ay - 6 - COM_H) - 3);
         const score =
-          ahead * 26 +
+          ahead * 22 +
           Math.min(rise, 42) * 0.55 -
           Math.abs(horiz - 24) * 0.45 -
           Math.max(0, ropeLen - 70) * 0.8 -
-          Math.abs(yo) * 4 +
-          (hv > 8 || turning ? side * prefer * sideWeight : 0);
+          Math.abs(Math.abs(yo) - 0.3) * 5 -
+          headOn * 14 -
+          reelNeeded * 1.4 +
+          (hv > 8 || turning ? side * prefer * sideWeight : side * prefer * 2);
         if (score > bestScore) {
           bestScore = score;
           _best.set(hit.point.x, ay, hit.point.z);
-          const nn = hitNormal(hit.building, hit.point);
           normal.set(nn.x, nn.y, nn.z);
         }
       }
@@ -550,9 +730,9 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       return true;
     }
     // no building in reach (open sky / high above roofs): forgiving sky anchor
-    if (s.pos.y > 150) return false;
+    if (s.pos.y > SKY_ANCHOR_MAX_Y) return false;
     normal.set(0, 0, 0);
-    out.set(_origin.x + hx * 24, _origin.y + 30, _origin.z + hz * 24);
+    out.set(_origin.x + hx * 24, _origin.y + 26, _origin.z + hz * 24);
     // never let a sky anchor pull the hero out of the play area
     const lim = city.bounds.max - 25;
     out.x = THREE.MathUtils.clamp(out.x, -lim, lim);
@@ -574,15 +754,21 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     _right.set(-Math.cos(s.facing), 0, Math.sin(s.facing));
     _d.copy(anchor).sub(_com);
     const hand: 0 | 1 = _d.dot(_right) > 0 ? 1 : 0;
-    s.web = { anchor, len: dist, maxLen, t: 0, arrive: dist / WEB_SPEED, hand };
+    // travel direction of this swing (for the apex release): velocity, else the camera
+    const hv0 = Math.hypot(s.vel.x, s.vel.z);
+    const dx = hv0 > 3 ? s.vel.x / hv0 : -Math.sin(s.camYaw);
+    const dz = hv0 > 3 ? s.vel.z / hv0 : -Math.cos(s.camYaw);
+    s.web = { anchor, len: dist, maxLen, t: 0, arrive: dist / WEB_SPEED, hand, dx, dz, still: 0 };
     s.lastHand = hand;
     s.holding = true;
     s.flipT = -1;
+    s.wings = false;
+    bankStyle();
     // launch off the ground so the pendulum engages
     if (s.onGround) {
       _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
-      s.vel.y = Math.max(s.vel.y, 13);
-      s.vel.addScaledVector(_fwd, 9);
+      s.vel.y = Math.max(s.vel.y, GROUND_LAUNCH_UP);
+      s.vel.addScaledVector(_fwd, GROUND_LAUNCH_FWD);
       s.onGround = false;
     } else if (s.vel.length() < 14) {
       // slow in the air: a small tug towards the anchor
@@ -594,28 +780,67 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     if (g && _anchorN.lengthSq() > 0.5) g.splats.add(anchor, _anchorN.x, _anchorN.y, _anchorN.z);
   };
 
-  const releaseWeb = (boost = true) => {
+  const releaseWeb = (boost = true, scale = 1) => {
     const s = st.current;
     const w = s.web;
     if (!w) return;
     s.web = null;
     s.holding = false;
     const sp = s.vel.length();
+    // letting go on the way up: the camera target hangs back for a moment (presentation only)
+    if (s.vel.y > 0) s.camHang = CAM.hangT;
     if (boost && sp > 10) {
-      // PS4-style release boost: forward along travel + up
-      _d.copy(s.vel).setY(0);
-      if (_d.lengthSq() > 1) s.vel.addScaledVector(_d.normalize(), 3.5);
-      s.vel.y += 6;
+      // release boost depends on timing: full when letting go on the way up (flight
+      // angle 20°..55°), nothing when still falling — like a real swing release
+      const up = s.vel.y / sp;
+      const timing = THREE.MathUtils.clamp((up - 0.08) / 0.26, 0, 1) * (up > 0.82 ? 0.5 : 1);
+      const kk = timing * Math.min(1, sp / 24) * scale;
+      if (kk > 0) {
+        _d.copy(s.vel).setY(0);
+        if (_d.lengthSq() > 1) s.vel.addScaledVector(_d.normalize(), 3 * kk);
+        s.vel.y += 4 * kk;
+      }
       s.releases++;
-      // a trick on a strong upward release: somersault / corkscrew, alternating
-      if (s.vel.y > 9 && s.releases % 2 === 1) {
-        s.flipT = 0;
-        s.trick = (s.releases >> 1) % 2;
+      if (kk > 0.9 && sp > 22) banner("Tam zamanında!");
+      // a trick on a well-timed, strong upward release: somersault / corkscrew, alternating
+      // (never over a manual trick)
+      if (kk > 0.6 && s.vel.y > 9 && s.releases % 2 === 1 && s.flipT < 0) {
+        startFlip((s.releases >> 1) % 2 === 1 ? Trick.Corkscrew : Trick.Somersault, false);
       }
     }
     // strand puff at the hand
     const g = gfx.current;
     if (g) particles.current?.emit(g.anim.palmWorld[w.hand], _tmp2.set(0, 0.5, 0), { life: 0.3, size: 0.5, color: "#ffffff", grow: 1.5 });
+  };
+
+  /* ---------- jumps ---------- */
+
+  /** A tap of the web button on the ground: a plain jump (`t` = seconds already airborne since the press). */
+  const jump = (t: number) => {
+    const s = st.current;
+    s.vel.set(s.tapVx + _wish.x * JUMP_KICK, Math.max(s.vel.y, JUMP_UP - GRAV * t), s.tapVz + _wish.z * JUMP_KICK);
+    s.onGround = false;
+    s.flipT = -1;
+    s.combo = 0;
+  };
+
+  /** Release of a charged jump: leap up and forward along the camera, scaled by the charge. */
+  const chargedJump = () => {
+    const s = st.current;
+    const k = chargeK(s.chargeT);
+    s.chargeT = -1;
+    _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
+    const fwd = CHARGE_FWD[0] + (CHARGE_FWD[1] - CHARGE_FWD[0]) * k;
+    s.vel.set(_fwd.x * fwd, CHARGE_UP[0] + (CHARGE_UP[1] - CHARGE_UP[0]) * k, _fwd.z * fwd);
+    s.onGround = false;
+    s.facing = s.camYaw + Math.PI;
+    s.shake = Math.min(1, s.shake + 0.15 + 0.3 * k);
+    if (k > 0.7) startFlip(Trick.Somersault, false);
+    for (let i = 0; i < 10; i++) {
+      const a2 = (i / 10) * Math.PI * 2;
+      _tmp2.set(Math.cos(a2) * 4, 0.8 + k, Math.sin(a2) * 4);
+      dust.current?.emit(_tmp.copy(s.pos).setY(s.pos.y + 0.15), _tmp2, { life: 0.7, size: 1.1, color: "#b9b4ab", grow: 2 });
+    }
   };
 
   /* ---------- walls ---------- */
@@ -624,6 +849,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const s = st.current;
     if (s.web) releaseWeb(false);
     s.zip = null;
+    s.wings = false;
     const vIn = -(s.vel.x * nx + s.vel.z * nz);
     const tx = nz;
     const tz = -nx;
@@ -643,6 +869,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wallDir.set(0, 1, 0);
     s.onGround = false;
     s.flipT = -1;
+    bankStyle();
     s.fallSpeed = 0;
     if (vIn > 9) {
       s.shake = Math.min(1, s.shake + vIn / 40);
@@ -674,7 +901,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wall = null;
     s.wallCool = 0.3;
     s.onGround = false;
-    if (run) { s.flipT = 0; s.trick = 0; }
+    if (run) startFlip(Trick.Somersault, false);
     s.facing = Math.atan2(-f.nx, -f.nz);
   };
 
@@ -696,8 +923,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wall = null;
     s.wallCool = 0.4;
     s.webLock = true;
-    s.flipT = 0;
-    s.trick = 0;
+    startFlip(Trick.Somersault, false);
     s.facing = Math.atan2(nx, nz);
   };
 
@@ -751,6 +977,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       }
     }
     if (s.web) releaseWeb(false);
+    s.wings = false;
     if (best) {
       _right.set(-Math.cos(s.facing), 0, Math.sin(s.facing));
       _d.copy(best.anchor).sub(_origin);
@@ -760,6 +987,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.wall = null;
       s.onGround = false;
       s.flipT = -1;
+      bankStyle();
       s.zipCool = 0.35;
       const g = gfx.current;
       const n = best.face ? { x: best.face.nx, y: 0, z: best.face.nz } : { x: 0, y: 1, z: 0 };
@@ -772,6 +1000,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.vel.addScaledVector(_d, 14);
       s.vel.y = Math.max(s.vel.y, 0) + 4;
       s.zipCool = 0.8;
+      s.flipT = -1;
+      bankStyle();
       const g = gfx.current;
       if (g) particles.current?.emit(g.anim.palmWorld[s.lastHand], _tmp2.set(0, 0, 0), { life: 0.35, size: 0.9, color: "#ffffff", grow: 2 });
     }
@@ -787,8 +1017,16 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.holding = false;
     s.wall = null;
     s.zip = null;
+    s.wings = false;
+    s.sling.active = false;
+    s.sling.flight = 0;
+    s.sling.held = keys.current.has("KeyC");
     s.combo = 0;
     s.flipT = -1;
+    s.tapT = -1;
+    s.chargeT = -1;
+    s.style = 0;
+    s.styleChain = 0;
     s.visOff.set(0, 0, 0);
     s.camYaw = spawn.yaw;
     s.facing = Math.PI;
@@ -801,6 +1039,50 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.bannerId++;
     s.bannerText = text;
     s.bannerT = 1.2;
+  };
+
+  /* ---------- air tricks / style ---------- */
+
+  /** Start a flip; manual ones (T / Numara) score style, automatic ones don't. */
+  const startFlip = (trick: Trick, manual: boolean) => {
+    const s = st.current;
+    s.flipT = 0;
+    s.trick = trick;
+    s.trickManual = manual;
+    s.flipDur = manual ? STYLE.duration : 0.8;
+  };
+
+  /** Manual trick: only in free fall, one at a time; the stick / WASD picks the kind. */
+  const startTrick = () => {
+    const s = st.current;
+    if (s.onGround || s.wall || s.web || s.zip || s.flipT >= 0) return;
+    const ax = Math.abs(s.inX);
+    const ay = Math.abs(s.inY);
+    let trick: Trick = Trick.Somersault;
+    if (ay >= ax && ay > STYLE.pick) trick = s.inY > 0 ? Trick.FrontFlip : Trick.BackFlip;
+    else if (ax > STYLE.pick) trick = s.inX > 0 ? Trick.CorkscrewR : Trick.Corkscrew;
+    startFlip(trick, true);
+  };
+
+  /** A manual trick finished in the air: style points, more for each link of the chain. */
+  const trickDone = () => {
+    const s = st.current;
+    s.styleChain++;
+    const mult = chainMult(s.styleChain);
+    const pts = Math.round(STYLE.points[s.trick] * mult);
+    s.style += pts;
+    banner(s.styleChain > 1 ? `+${pts} stil · ×${mult}` : `+${pts} stil`);
+  };
+
+  /** Unbanked style goes into the score (clean landing, web, zip, wall). */
+  const bankStyle = () => {
+    const s = st.current;
+    if (s.style > 0) {
+      s.score += s.style;
+      banner(`Stil +${s.style}!`);
+    }
+    s.style = 0;
+    s.styleChain = 0;
   };
 
   function collectRings() {
@@ -998,8 +1280,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         // point launch: spring off the perch
         s.vel.set(_d.x * 17, 16, _d.z * 17);
         s.onGround = false;
-        s.flipT = 0;
-        s.trick = 0;
+        startFlip(Trick.Somersault, false);
         banner("Fırla!");
         s.shake = Math.min(1, s.shake + 0.25);
       } else {
@@ -1014,6 +1295,94 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.wallCool = 0.1;
   }
 
+  /**
+   * One physics substep on the web wings. The wings carry the weight: gravity
+   * (already applied) is given back and the vertical speed settles on a sink
+   * rate instead. Pitching down steepens the sink and turns height into speed;
+   * pitching up climbs while spending speed (a stall folds the wings, see step).
+   */
+  function stepGlide(h: number, hv: number, carve: boolean) {
+    const s = st.current;
+    const lift = THREE.MathUtils.clamp((hv - 6) / 10, 0, 1);
+    s.vel.y += GRAV * lift * h;
+    const pitch = THREE.MathUtils.clamp(s.inY, -1, 1);
+    let vyT = -WING.sink - Math.max(0, WING.slowRef - hv) * WING.slowSink;
+    _d.copy(s.vel).setY(0);
+    if (hv > 1e-3) _d.divideScalar(hv);
+    if (pitch < 0) {
+      vyT += pitch * WING.diveSink;
+      if (hv < WING.maxSpeed) s.vel.addScaledVector(_d, -pitch * WING.diveAcc * h);
+    } else if (pitch > 0) {
+      const margin = THREE.MathUtils.clamp((hv - WING.stall) / 10, 0, 1);
+      vyT += pitch * WING.climb * margin;
+      s.vel.addScaledVector(_d, -pitch * WING.climbDecel * h);
+    }
+    s.vel.y += (vyT - s.vel.y) * (1 - Math.exp(-WING.liftRate * lift * h));
+    // bank: A/D turn the path (touch: the stick already does, see `carve` in step)
+    const steer = carve ? touchTurn(s.inX) : s.inX;
+    if (!carve && steer !== 0) {
+      const a = -steer * WING.turnRate * h;
+      const c = Math.cos(a);
+      const sn = Math.sin(a);
+      const vx = s.vel.x;
+      s.vel.x = vx * c + s.vel.z * sn;
+      s.vel.z = -vx * sn + s.vel.z * c;
+    }
+    s.wingSteer = steer;
+  }
+
+  function stepSling(h: number, k: Set<string>) {
+    const s = st.current;
+    const sl = s.sling;
+    const held = k.has("KeyC");
+    const pressed = held && !sl.held;
+    sl.held = held;
+    sl.flight = Math.max(0, sl.flight - h);
+    if (s.onGround || s.wall || s.web || s.zip) sl.flight = 0;
+    const web = k.has("Space") || k.has("KeyE") || mouseDown.current;
+    const valid = s.onGround && !s.wall && !s.web && !s.zip;
+    if (pressed && valid && !web) {
+      _origin.copy(s.pos).setY(s.pos.y + COM_H);
+      if (findSlingAnchors(_origin, s.camYaw, solids.webFaces, solids.list, sl.left, sl.right)) {
+        sl.active = true;
+        sl.t = 0;
+        sl.inputX = s.inX;
+        sl.inputY = s.inY;
+        s.vel.set(0, 0, 0);
+        s.flipT = -1;
+        s.fallSpeed = 0;
+      } else banner("Sapan için iki yanda yakın bina gerek");
+    }
+    if (!sl.active) return false;
+    // A walk already held when charging starts is allowed; a fresh direction cancels.
+    const hardMove = virtualStick.active
+      ? Math.hypot(s.inX, s.inY) > SLING.cancelStick
+      : (s.inX !== 0 && s.inX !== sl.inputX) || (s.inY !== 0 && s.inY !== sl.inputY);
+    if (s.inX === 0) sl.inputX = 0;
+    if (s.inY === 0) sl.inputY = 0;
+    if (!valid || web || hardMove || k.has("ShiftLeft") || k.has("ShiftRight")) {
+      sl.active = false;
+      return false;
+    }
+    s.facing = Math.atan2(-Math.sin(s.camYaw), -Math.cos(s.camYaw));
+    if (!held) {
+      sl.active = false;
+      if (sl.t + 1e-8 < SLING.minCharge) return false;
+      const charge = THREE.MathUtils.clamp((sl.t - SLING.minCharge) / (SLING.maxCharge - SLING.minCharge), 0, 1);
+      const speed = THREE.MathUtils.lerp(SLING.minSpeed, SLING.maxSpeed, charge);
+      const horizontal = speed * Math.cos(SLING.pitch);
+      s.vel.set(-Math.sin(s.camYaw) * horizontal, speed * Math.sin(SLING.pitch), -Math.cos(s.camYaw) * horizontal);
+      s.onGround = false;
+      s.airTime = 0;
+      sl.flight = SLING.layoutTime;
+      s.shake = Math.min(1, s.shake + 0.25);
+      banner("Sapan!");
+    } else {
+      sl.t = Math.min(SLING.maxCharge, sl.t + h);
+    }
+    return true;
+  }
+
   function step(h: number, k: Set<string>) {
     const s = st.current;
     _fwd.set(-Math.sin(s.camYaw), 0, -Math.cos(s.camYaw));
@@ -1025,6 +1394,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       s.inX = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
       s.inY = (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
     }
+    if (stepSling(h, k)) return;
     // touch, airborne: stick sideways turns (view + path together, see the camera
     // yaw in useFrame) instead of pushing sideways, which read as sliding off
     const carve = touch && virtualStick.active && !s.onGround && !s.wall && !s.zip;
@@ -1056,6 +1426,11 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const sprint = k.has("ShiftLeft") || k.has("ShiftRight");
     s.wallCool -= h;
     s.zipCool -= h;
+    if (s.tapT >= 0 && (s.tapT += h) > TAP_WINDOW) s.tapT = -1;
+    if (s.chargeT >= 0) {
+      if (s.onGround && !s.wall && !s.zip) s.chargeT = Math.min(CHARGE_FULL, s.chargeT + h);
+      else s.chargeT = -1;
+    }
 
     if (s.wall) {
       stepWall(h, sprint);
@@ -1074,7 +1449,8 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       const gy = groundHeightAt(s.pos.x, s.pos.z, s.pos.y, solids.list);
       const grounded = !s.web && s.pos.y <= gy + 0.03 && s.vel.y <= 0.5;
       if (grounded) {
-        const target = _tmp.copy(_wish).multiplyScalar(sprint ? SPRINT : RUN);
+        // charging a jump: plant the feet
+        const target = _tmp.copy(_wish).multiplyScalar(s.chargeT >= 0 ? 0 : sprint ? SPRINT : RUN);
         const a = 1 - Math.exp(-14 * h);
         s.vel.x += (target.x - s.vel.x) * a;
         s.vel.z += (target.z - s.vel.z) * a;
@@ -1100,10 +1476,18 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
             }
           }
           s.combo = 0;
+          if (s.flipT >= 0 && s.trickManual) {
+            // down before the trick finished: the unbanked style is gone
+            s.style = 0;
+            s.styleChain = 0;
+            banner("Düştün!");
+          } else bankStyle();
           s.flipT = -1;
+          s.trickManual = false;
         }
         s.onGround = true;
         s.airTime = 0;
+        s.wings = false;
         s.pos.addScaledVector(s.vel, h);
       } else {
         s.onGround = false;
@@ -1112,7 +1496,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         if (s.pos.y > 170) s.vel.y -= (s.pos.y - 170) * 2 * h; // soft ceiling
         // quadratic air drag
         const sp = s.vel.length();
-        s.vel.multiplyScalar(1 - Math.min(0.5, 0.0016 * sp * h));
+        s.vel.multiplyScalar(1 - Math.min(0.5, (s.wings ? WING.drag : 0.0016) * sp * h));
 
         if (w && s.holding) {
           w.t += h;
@@ -1122,16 +1506,26 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           _n.copy(_d).divideScalar(dl || 1); // radial (anchor → hero)
           const taut = w.t >= w.arrive;
           if (taut) {
-            // tangential pump along travel keeps the swing alive
-            _tmp.copy(s.vel).addScaledVector(_n, -s.vel.dot(_n));
-            const tl = _tmp.length();
-            if (tl > 0.5 && sp < 46) s.vel.addScaledVector(_tmp.divideScalar(tl), 7.5 * h);
-            // steer: camera forward (+stick), projected on the tangent plane
-            _tmp2.copy(_fwd).multiplyScalar(6).addScaledVector(_wish, touch ? TOUCH.swingSteer : 7);
-            _tmp2.addScaledVector(_n, -_tmp2.dot(_n));
-            s.vel.addScaledVector(_tmp2, h);
+            // speed comes from the pendulum (gravity). Pushing forward (W / stick) pumps
+            // the swing like a real one: a tangential push, strongest at the bottom of
+            // the arc, fading out towards the cruise speed
+            const push = Math.max(0, s.inY);
+            if (push > 0 && sp < SWING_CRUISE) {
+              _tmp.copy(s.vel).addScaledVector(_n, -s.vel.dot(_n));
+              const tl = _tmp.length();
+              const bottom = Math.max(0, (_n.y - 0.55) / 0.45);
+              if (tl > 0.5 && bottom > 0) s.vel.addScaledVector(_tmp.divideScalar(tl), PUMP * push * bottom * (1 - sp / SWING_CRUISE) * h);
+            }
+            // sideways steering (A/D), projected on the tangent plane
+            if (!carve && s.inX !== 0) {
+              _tmp2.copy(_right).multiplyScalar(s.inX * 7);
+              _tmp2.addScaledVector(_n, -_tmp2.dot(_n));
+              s.vel.addScaledVector(_tmp2, h);
+            }
+            // soft cap: swinging above cruise speed costs energy
+            if (sp > SWING_CRUISE) s.vel.multiplyScalar(1 - Math.min(0.5, (sp - SWING_CRUISE) * 0.25 * h));
             // reel the rope in towards the safe length (lifts you off the street)
-            if (w.len > w.maxLen) w.len = Math.max(w.maxLen, w.len - 26 * h);
+            if (w.len > w.maxLen) w.len = Math.max(w.maxLen, w.len - (REEL + Math.min(12, (w.len - w.maxLen) * 1.5)) * h);
           } else {
             // strand still flying: the rope length follows (no pull yet)
             w.len = Math.max(dl, 1);
@@ -1147,17 +1541,54 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
             s.pos.set(_com.x, _com.y - COM_H, _com.z);
             const vr = s.vel.dot(_d);
             if (vr > 0) s.vel.addScaledVector(_d, -vr);
+            // swing assist: the rope pulls sideways towards the anchor's plane, which
+            // would curve the path into the facade — damp that drift (steering still wins)
+            const lat = -s.vel.x * w.dz + s.vel.z * w.dx;
+            const damp = lat * (1 - Math.exp(-2.5 * h));
+            s.vel.x += damp * w.dz;
+            s.vel.z -= damp * w.dx;
           }
           // swung above the anchor → auto release (keeps the flow going)
           if (_com.y > w.anchor.y - 1.5 && w.t > 0.4) releaseWeb();
+          else if (taut && w.t > w.arrive + 0.3) {
+            // hanging still (touched down, or wedged against a facade): the swing is over,
+            // a fresh press starts the next one
+            w.still = sp < 1.5 ? w.still + h : 0;
+            if ((s.pos.y <= gy + 0.05 && s.vel.y <= 0.5) || w.still > 0.4) {
+              releaseWeb(false);
+              s.webLock = true;
+            } else {
+              // front of the arc, past the anchor: holding on would only swing you back.
+              // Let go on the way up once the rope leans 42° forward (a smaller boost than
+              // a timed release), or when the forward speed is gone
+              const fwdV = s.vel.x * w.dx + s.vel.z * w.dz;
+              const past = (w.anchor.x - s.pos.x) * w.dx + (w.anchor.z - s.pos.z) * w.dz < 0;
+              if (past && ((s.vel.y > 0 && _n.y < 0.74) || fwdV < 0.5)) releaseWeb(fwdV > 4, 0.6);
+            }
+          }
         } else {
-          // air control
-          s.vel.addScaledVector(_wish, 8 * h);
-          if (sprint) {
-            // dive: trade height for speed
-            s.vel.y -= 20 * h;
-            _d.copy(s.vel).setY(0);
-            if (_d.lengthSq() > 1) s.vel.addScaledVector(_d.normalize(), 7 * h);
+          // web wings: held F in free flight with enough speed. Shift folds them into a
+          // dive; a stall (too slow) folds them until the next press
+          const wantWings = k.has("KeyF") && !sprint;
+          const hv = Math.hypot(s.vel.x, s.vel.z);
+          if (!k.has("KeyF")) s.wingLock = false;
+          if (s.wings && (!wantWings || hv < WING.stall)) {
+            s.wings = false;
+            if (hv < WING.stall) s.wingLock = true;
+          } else if (!s.wings && wantWings && !s.wingLock && hv >= WING.open) {
+            s.wings = true;
+            s.flipT = -1;
+          }
+          if (s.wings) stepGlide(h, hv, carve);
+          else {
+            // air control
+            s.vel.addScaledVector(_wish, 8 * h);
+            if (sprint) {
+              // dive: trade height for speed
+              s.vel.y -= 20 * h;
+              _d.copy(s.vel).setY(0);
+              if (_d.lengthSq() > 1) s.vel.addScaledVector(_d.normalize(), 7 * h);
+            }
           }
           s.pos.addScaledVector(s.vel, h);
         }
@@ -1287,11 +1718,42 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     if (started) {
       const pressed = wantWeb && !s.prevWant;
       if (!wantWeb) s.webLock = false;
+      if (s.sling.active && wantWeb) {
+        s.sling.active = false;
+        s.webLock = true;
+      }
       if (s.wall) {
         if (pressed) wallJump();
+      } else if (s.chargeT >= 0) {
+        // charging: the release decides — a quick chord is a jump, a held one a leap
+        if (!wantWeb) {
+          if (s.chargeT >= CHARGE_MIN) chargedJump();
+          else {
+            s.chargeT = -1;
+            jump(0);
+          }
+        }
       } else {
-        if (wantWeb && !s.holding && !s.webLock && !s.zip) attachWeb();
-        if (!wantWeb && s.holding) releaseWeb();
+        if (pressed && s.onGround && !s.webLock && !s.zip) {
+          const sprint = k.has("ShiftLeft") || k.has("ShiftRight");
+          if (sprint && hvel < CHARGE_MAX_SPEED) s.chargeT = 0;
+          else {
+            s.tapVx = s.vel.x;
+            s.tapVz = s.vel.z;
+            attachWeb();
+            if (s.web) s.tapT = 0;
+            else jump(0); // nothing to web (high roof, open sky): just jump
+          }
+        } else if (wantWeb && !s.holding && !s.webLock && !s.zip) attachWeb();
+        if (!wantWeb && s.holding) {
+          if (s.tapT >= 0) {
+            // a tap (still within TAP_WINDOW, so still low): drop the web without a boost and jump instead
+            const t = s.tapT;
+            releaseWeb(false);
+            jump(t);
+          } else releaseWeb();
+          s.tapT = -1;
+        }
         // touch: turning bends the swing until its anchor falls behind; then the next
         // web goes out, on the inside of the turn (findAnchor), not too often
         s.reanchorT -= dt;
@@ -1308,11 +1770,24 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           }
         }
       }
-      if (edge(k, "KeyQ") || rmbPressed) startZip();
+      const zipPressed = edge(k, "KeyQ") || rmbPressed;
+      if (zipPressed && !s.sling.active) startZip();
+      if (edge(k, "KeyT") && !s.sling.active) startTrick();
       if (edge(k, "KeyR")) reset();
       s.prevWant = wantWeb;
+    } else {
+      s.sling.active = false;
+      s.sling.held = k.has("KeyC");
     }
     if (s.bannerT > 0) s.bannerT -= dt;
+    // (before the physics: a trick that finishes this frame counts before a landing)
+    if (s.flipT >= 0) {
+      s.flipT += dt / s.flipDur;
+      if (s.flipT >= 1) {
+        s.flipT = -1;
+        if (s.trickManual) trickDone();
+      }
+    }
 
     if (started) {
       s.acc += dt;
@@ -1325,16 +1800,17 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     // render state interpolated between the last two physics states (no judder at 120/144 Hz)
     s.renderPos.lerpVectors(s.prevPos, s.pos, started ? s.acc / SUB : 1);
     s.visOff.multiplyScalar(Math.exp(-11 * dt));
-    if (s.flipT >= 0) {
-      s.flipT += dt / 0.8;
-      if (s.flipT >= 1) s.flipT = -1;
-    }
+    s.wingT += ((s.wings ? 1 : 0) - s.wingT) * (1 - Math.exp(-(s.wings ? 9 : 14) * dt));
+    s.wingBank += ((s.wings ? s.wingSteer * WING.bank : 0) - s.wingBank) * (1 - Math.exp(-5 * dt));
 
     // ---- centre of mass offset (walls push the body off the plane) ----
     const wl = s.wall;
     if (wl) {
       const out = wl.run ? 0.5 : -0.05;
       _off.set(wl.f.nx * out, COM_H, wl.f.nz * out);
+    } else if (s.sling.active) {
+      const crouch = Math.min(1, s.sling.t / 0.3);
+      _off.set(Math.sin(s.camYaw) * 0.3 * crouch, COM_H - 0.22 * crouch, Math.cos(s.camYaw) * 0.3 * crouch);
     } else _off.set(0, COM_H, 0);
     s.comOff.lerp(_off, 1 - Math.exp(-12 * dt));
     const rp = _rp.copy(s.renderPos).add(s.visOff);
@@ -1347,16 +1823,19 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const w = s.web;
     const z = s.zip;
     if (g) {
-      const { rig, anim, web, animIn, splats } = g;
+      const { rig, anim, web, slingWeb, animIn, splats } = g;
       animIn.speed = hv;
       animIn.vy = s.vel.y;
-      animIn.anchor = w ? w.anchor : z ? z.anchor : null;
+      animIn.anchor = s.sling.active ? s.sling.left : w ? w.anchor : z ? z.anchor : null;
+      animIn.anchorRight = s.sling.active ? s.sling.right : null;
       animIn.hand = w ? w.hand : z ? z.hand : s.lastHand;
       animIn.flip = s.flipT;
       animIn.trick = s.trick;
       animIn.impact = s.fallSpeed;
       animIn.webT = w ? w.t : z ? z.t : 0;
       animIn.dive = !s.onGround && !w && !wl && !z && (k.has("ShiftLeft") || k.has("ShiftRight")) && s.vel.y < -4;
+      animIn.glide = s.wings;
+      animIn.crouch = s.chargeT >= CHARGE_MIN ? 0.7 + 0.3 * chargeK(s.chargeT) : 0;
       _com.copy(rp).add(s.comOff);
       if (wl) {
         const n = _n.set(wl.f.nx, 0, wl.f.nz);
@@ -1380,6 +1859,11 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         _bodyUp.copy(_up).addScaledVector(_bodyFwd, -_bodyFwd.y).normalize();
         if (_bodyUp.lengthSq() < 0.1) _bodyUp.copy(_hv);
         animIn.orientRate = 8;
+      } else if (s.sling.active) {
+        animIn.mode = Mode.Sling;
+        _bodyUp.copy(_up);
+        _bodyFwd.copy(_hv);
+        animIn.orientRate = 12;
       } else if (s.onGround) {
         animIn.mode = Mode.Ground;
         _bodyUp.copy(_up);
@@ -1395,32 +1879,52 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         const along = _d.dot(_hv);
         animIn.swingPhase = 0.5 + 0.5 * THREE.MathUtils.clamp(along / (0.6 * w.len), -1, 1);
         animIn.orientRate = 7;
+      } else if (s.sling.flight > 0 && !animIn.dive) {
+        animIn.mode = Mode.Layout;
+        _bodyUp.copy(s.vel).normalize();
+        _bodyFwd.copy(_up).addScaledVector(_bodyUp, -_bodyUp.y).normalize();
+        animIn.orientRate = 12;
       } else {
         animIn.mode = Mode.Air;
         let p: number;
         if (animIn.dive) p = Math.atan2(hv, s.vel.y);
+        else if (s.wings) p = 1.25 - THREE.MathUtils.clamp(s.vel.y / 12, -0.25, 0.25);
         else if (s.vel.y > 4) p = 0.2;
         else p = THREE.MathUtils.clamp(-s.vel.y / 24, 0, 1) * 1.1;
         const c = Math.cos(p);
         const sn = Math.sin(p);
         _bodyUp.copy(_up).multiplyScalar(c).addScaledVector(_hv, sn);
         _bodyFwd.copy(_hv).multiplyScalar(c).addScaledVector(_up, -sn);
-        animIn.orientRate = 4.5;
+        if (Math.abs(s.wingBank) > 1e-3) {
+          // bank into the turn: roll the body about its travel axis
+          _tmp.crossVectors(_hv, _up);
+          _bodyUp.multiplyScalar(Math.cos(s.wingBank)).addScaledVector(_tmp, Math.sin(s.wingBank));
+          _bodyFwd.addScaledVector(_bodyUp, -_bodyFwd.dot(_bodyUp)).normalize();
+        }
+        animIn.orientRate = s.wings ? 5 : 4.5;
       }
       animIn.up.copy(_bodyUp);
       animIn.fwd.copy(_bodyFwd);
       rig.root.position.copy(_com);
       anim.update(dt, animIn);
       splats.update(dt);
+      g.wings.update(rig, s.wingT, primeFrames > 0);
 
       // ---- web strand (swing rope or zip line) ----
-      const strand = w ? { anchor: w.anchor, hand: w.hand, t: w.t, arrive: w.arrive } : z ? { anchor: z.anchor, hand: z.hand, t: z.t, arrive: z.travel } : null;
-      if (strand) {
+      const strand = w || z;
+      slingWeb.mesh.visible = s.sling.active || primeFrames > 0;
+      if (s.sling.active) {
         web.mesh.visible = true;
-        const extend = Math.min(1, (strand.t + 0.012) / Math.max(0.03, strand.arrive) + (started ? 0 : 1));
-        const slack = Math.max(0, 1 - (strand.t - strand.arrive) / 0.2) * (w ? 1 : 0.4);
+        const extend = Math.min(1, s.sling.t * WEB_SPEED / SLING.range);
+        web.update(anim.palmWorld[0], s.sling.left, camera.position, extend, 0, s.time);
+        slingWeb.update(anim.palmWorld[1], s.sling.right, camera.position, extend, 0, s.time);
+      } else if (strand) {
+        web.mesh.visible = true;
+        const arrive = w ? w.arrive : z!.travel;
+        const extend = Math.min(1, (strand.t + 0.012) / Math.max(0.03, arrive) + (started ? 0 : 1));
+        const slack = Math.max(0, 1 - (strand.t - arrive) / 0.2) * (w ? 1 : 0.4);
         web.update(anim.palmWorld[strand.hand], strand.anchor, camera.position, extend, Math.min(1, slack), s.time);
-        if (strand.t >= strand.arrive && strand.t - dt < strand.arrive) {
+        if (strand.t >= arrive && strand.t - dt < arrive) {
           // impact puff where the strand sticks
           particles.current?.emit(strand.anchor, _tmp2.set(0, 0, 0), { life: 0.4, size: 1.4, color: "#ffffff", grow: 1.2 });
         }
@@ -1430,6 +1934,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         web.update(anim.palmWorld[0], anim.palmWorld[0], camera.position, 0, 0, s.time);
       } else web.mesh.visible = false;
       if (primeFrames > 0) {
+        if (!s.sling.active) slingWeb.update(anim.palmWorld[1], anim.palmWorld[1], camera.position, 0, 0, s.time);
         splats.prime(primeFrames > 1);
         primeFrames--;
       }
@@ -1440,13 +1945,21 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     const speed = s.vel.length();
     speedRef.current = speed;
     if (!s.camInit) s.camSmooth.copy(_com);
-    s.camSmooth.lerp(_com, 1 - Math.exp(-(s.onGround ? 14 : wl ? 10 : 9) * dt));
+    // release "hang": right after letting go on the way up the target trails for a moment,
+    // so the hero visibly shoots up the frame before the camera catches up
+    if (s.camHang > 0) s.camHang = Math.max(0, s.camHang - dt);
+    const hang = s.camHang / CAM.hangT;
+    s.camSmooth.lerp(_com, 1 - Math.exp(-(s.onGround ? 14 : wl ? 10 : 9) * (1 - CAM.hangSlow * hang) * dt));
     // don't let the smoothed target trail too far behind at high speed (soft limit)
     _d.copy(s.camSmooth).sub(_com);
     const lag = _d.length();
-    const maxLag = 0.9;
+    const maxLag = 0.9 + 2 * hang;
     if (lag > maxLag) s.camSmooth.copy(_com).addScaledVector(_d, (maxLag + (lag - maxLag) * 0.25) / lag);
-    const autoPitch = wl
+    s.camLag = Math.min(lag, maxLag + (lag - maxLag) * 0.25);
+    // bottom of the arc (taut rope near vertical): frame from lower and further back, more so when fast
+    const taut = !!w && w.t >= w.arrive;
+    const low = taut ? THREE.MathUtils.clamp(((w.anchor.y - _com.y) / w.len - 0.55) / 0.45, 0, 1) * Math.min(1, speed / SWING_CRUISE) : 0;
+    const autoPitch = s.sling.active ? -0.03 : wl
       ? wl.run && s.vel.y > 2
         ? 0.5
         : s.vel.y < -2
@@ -1454,14 +1967,16 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
           : 0.08
       : s.onGround
         ? -0.14
-        : THREE.MathUtils.clamp(-0.16 + s.vel.y * 0.006, -0.45, 0.05);
+        : s.wings
+          ? -0.07
+          : THREE.MathUtils.clamp(-0.16 + s.vel.y * 0.006, -0.45, 0.05) + low * CAM.lowPitch;
     if (lockedRef.current && touchIdle) {
       // touch: drift the drag pitch back towards the automatic framing
       pitchRef.current += (autoPitch - pitchRef.current) * (1 - Math.exp(-1.5 * dt));
     }
     const targetPitch = lockedRef.current ? pitchRef.current : autoPitch;
     s.camPitch += (targetPitch - s.camPitch) * (1 - Math.exp(-(manual ? 30 : lockedRef.current ? 12 : 3) * dt));
-    const wantDist = wl ? (wl.run ? 4.8 : 4.3) : 3.9 + Math.min(1.2, speed / 40);
+    const wantDist = s.sling.active ? 5.3 + s.sling.t / SLING.maxCharge : wl ? (wl.run ? 4.8 : 4.3) : 3.9 + Math.min(1.2, speed / 40) + low * CAM.lowDist + (s.wings ? 1.1 : 0);
     s.camDist += (wantDist - s.camDist) * (1 - Math.exp(-3 * dt));
     const dist = s.dbgDist || s.camDist;
     const vYaw = s.camYaw + s.dbgYaw;
@@ -1475,9 +1990,10 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     if (volumeAt(_camTarget.x, _camTarget.y, _camTarget.z, city.buildings, 0.25)) {
       _camTarget.copy(s.camSmooth).addScaledVector(_up, 0.55).add(_off);
     }
-    const cp = Math.cos(s.camPitch);
+    const viewPitch = s.sling.active ? s.camPitch * 0.3 : s.camPitch;
+    const cp = Math.cos(viewPitch);
     _camPos
-      .set(Math.sin(vYaw) * cp, -Math.sin(s.camPitch), Math.cos(vYaw) * cp)
+      .set(Math.sin(vYaw) * cp, -Math.sin(viewPitch), Math.cos(vYaw) * cp)
       .multiplyScalar(dist)
       .add(_camTarget);
     if (_camPos.y < 0.6) _camPos.y = 0.6;
@@ -1524,20 +2040,26 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
       camera.position.z = THREE.MathUtils.clamp(camera.position.z, -lim, lim);
     }
     cam.lookAt(_camTarget);
-    // roll into the swing
-    let rollT = 0;
-    if (w) {
+    // roll into the rope's sideways pull (centripetal + gravity along the rope); decays in free flight
+    let rollT = s.wingBank * 0.15;
+    if (taut) {
       _d.copy(w.anchor).sub(_com);
-      rollT = THREE.MathUtils.clamp(-_d.dot(_right) / (w.len + 1), -1, 1) * 0.1;
+      const L = _d.length() || 1;
+      const pull = (speed * speed) / Math.max(4, w.len) + GRAV * Math.max(0, _d.y / L);
+      rollT = THREE.MathUtils.clamp(((-_d.dot(_right) / L) * pull) / CAM.rollAccel, -1, 1) * CAM.rollMax;
     }
-    s.camRoll += (rollT - s.camRoll) * (1 - Math.exp(-3 * dt));
+    s.camRoll += (rollT - s.camRoll) * (1 - Math.exp(-(taut ? 4 : 2.5) * dt));
     cam.rotateZ(s.camRoll);
     cam.getWorldDirection(s.camDir);
-    const targetFov = 60 + Math.min(1, speed / 55) * 14;
-    const nf = cam.fov + (targetFov - cam.fov) * (1 - Math.exp(-3 * dt));
-    if (Math.abs(nf - cam.fov) > 1e-3) {
-      cam.fov = nf;
+    // field of view: wider with speed (towards cruise) and in a dive; the projection
+    // matrix is only rebuilt when the fov actually moved, not every frame
+    const dive = !!g && g.animIn.dive;
+    const targetFov = CAM.fov + THREE.MathUtils.smoothstep(speed, 6, SWING_CRUISE) * CAM.fovSpeed + (dive ? CAM.fovDive : 0);
+    s.camFov += (targetFov - s.camFov) * (1 - Math.exp(-CAM.fovRate * dt));
+    if (Math.abs(s.camFov - cam.fov) > CAM.fovStep) {
+      cam.fov = s.camFov;
       cam.updateProjectionMatrix();
+      s.projUpdates++;
     }
     s.edge = distanceToEdge(s.pos.x, s.pos.z, city) < BOUNDARY_WARN;
 
@@ -1553,11 +2075,15 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         rings: s.ringsGot,
         score: s.score,
         combo: s.combo,
+        style: s.style,
+        styleChain: s.styleChain,
         bannerId: s.bannerT > 0 ? s.bannerId : 0,
         bannerText: s.bannerText,
         edge: s.edge,
         place: s.wall ? 2 : s.onGround ? 0 : 1,
         wallHint: !!s.wall && s.wallVisits <= 3,
+        charge: s.chargeT >= CHARGE_MIN ? Math.max(0.05, Math.round(chargeK(s.chargeT) * 20) / 20) : 0,
+        slingCharge: s.sling.active ? Math.round(s.sling.t / SLING.maxCharge * 100) : -1,
       };
       const o = s.lastHud;
       if (
@@ -1569,10 +2095,14 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
         o.rings !== nh.rings ||
         o.score !== nh.score ||
         o.combo !== nh.combo ||
+        o.style !== nh.style ||
+        o.styleChain !== nh.styleChain ||
         o.bannerId !== nh.bannerId ||
         o.edge !== nh.edge ||
         o.place !== nh.place ||
-        o.wallHint !== nh.wallHint
+        o.wallHint !== nh.wallHint ||
+        o.charge !== nh.charge ||
+        o.slingCharge !== nh.slingCharge
       ) {
         s.lastHud = nh;
         onHud(nh);
@@ -1594,6 +2124,13 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
   );
 }
 
+/** Skor tile tag: ring combo and the unbanked style ("×3 kombo · stil 450 ×2") */
+function scoreSub(h: Hud) {
+  const combo = h.combo > 1 ? `×${h.combo} kombo` : "";
+  const style = h.style > 0 ? `stil ${h.style}${h.styleChain > 1 ? ` ×${chainMult(h.styleChain)}` : ""}` : "";
+  return combo && style ? `${combo} · ${style}` : combo || style || undefined;
+}
+
 export default function Spiderman({ started }: { started: boolean }) {
   const [hud, setHud] = useState<Hud>({
     speed: 0,
@@ -1603,11 +2140,15 @@ export default function Spiderman({ started }: { started: boolean }) {
     rings: 0,
     score: 0,
     combo: 0,
+    style: 0,
+    styleChain: 0,
     bannerId: 0,
     bannerText: "",
     edge: false,
     place: 0,
     wallHint: false,
+    charge: 0,
+    slingCharge: -1,
   });
   // the 3D tree must not re-render with every HUD update (≈10×/s)
   const dpr = useCanvasDpr();
@@ -1621,14 +2162,25 @@ export default function Spiderman({ started }: { started: boolean }) {
         {scene}
       </Canvas>
       <HudStack>
-        <HudStat label="Skor" value={`${hud.score}`} accent={ACCENT} sub={hud.combo > 1 ? `×${hud.combo} kombo` : undefined} />
+        <HudStat label="Skor" value={`${hud.score}`} accent={ACCENT} sub={scoreSub(hud)} />
         <HudStat label="Halka" value={`${hud.rings}/${RING_COUNT}`} accent="#0284c7" />
         <HudStat label="Hız" value={`${hud.speed} km/h`} accent="#14141f" />
         <HudStat label="Yükseklik" value={`${hud.height} m`} accent="#6b6880" />
       </HudStack>
       <HudEdge show={started && hud.edge} />
+      {hud.charge > 0 && (
+        <div className="pointer-events-none absolute left-1/2 top-[63%] h-1.5 w-28 -translate-x-1/2 overflow-hidden rounded-full bg-[#0a0a0a]/50 ring-1 ring-white/50">
+          <div className="h-full rounded-full transition-[width] duration-100" style={{ width: `${hud.charge * 100}%`, background: ACCENT }} />
+        </div>
+      )}
       {hud.bannerId > 0 && <HudBanner keyId={hud.bannerId} text={hud.bannerText} accent="#0284c7" />}
-      {started && !hud.locked && <HudCenter text="Tıkla: fare ile bak · Space / Sol tık basılı: ağ at · Q / Sağ tık: zip" />}
+      {started && !hud.locked && hud.slingCharge < 0 && <HudCenter text="Tıkla: fare ile bak · Space: basılı ağ, kısa zıpla · Shift+Space: sıçra · Q: zip · C: sapan · F: kanat · T: numara" />}
+      {started && hud.slingCharge >= 0 && (
+        <HudCenter
+          text={`Sapan %${hud.slingCharge} · ${hud.slingCharge < 17 ? "Hazırlanıyor…" : "Bırak: fırla"} · Yön tuşu / Ağ: iptal`}
+          touchText={`Sapan %${hud.slingCharge} · ${hud.slingCharge < 17 ? "Hazırlanıyor…" : "Bırak: fırla"} · Çubuğu sert it / Ağ: iptal`}
+        />
+      )}
       {started && hud.rings === RING_COUNT && (
         <HudBanner text="Tüm halkalar toplandı!" accent={ACCENT} sub={`Skor ${hud.score}`} />
       )}
@@ -1638,10 +2190,10 @@ export default function Spiderman({ started }: { started: boolean }) {
           touchText="Joystick ile tırman · Koş ile duvarda koş · Ağ ile sıçra"
         />
       )}
-      {started && hud.place === 0 && !hud.attached && hud.height < 2 && hud.speed < 5 && (
+      {started && hud.place === 0 && !hud.attached && hud.slingCharge < 0 && hud.speed < 5 && (
         <HudHint
-          text="Ağ için Space'e basılı tut, bırakınca uçarsın · Binaya doğru koş: tırman"
-          touchText="Ağ tuşuna basılı tut, bırakınca uçarsın · Binaya doğru it: tırman"
+          text="Space basılı: ağ · C basılı, bırak: sapan · Binaya doğru koş: tırman"
+          touchText="Ağ basılı: sallan · Sapan basılı, bırak: fırla · Binaya doğru it: tırman"
         />
       )}
     </div>

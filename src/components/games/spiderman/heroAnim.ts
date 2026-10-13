@@ -4,7 +4,7 @@ import type { BoneName, HeroRig } from "./heroModel";
 /**
  * Hero animation: mocap clips (AnimationMixer) blended by a continuous state
  * machine, plus procedural layers on top for things no stock clip covers
- * (web-arm aiming, swinging legs, flips, skydive spread, dive).
+ * (web-arm aiming, swinging legs, flips, skydive spread, dive, web-wing glide).
  *
  *  - Base layer: every clip is always "playing"; we drive each action's time
  *    and weight ourselves. Target weights come from the movement state and the
@@ -19,8 +19,11 @@ import type { BoneName, HeroRig } from "./heroModel";
  * No allocations per frame.
  */
 
-export const Mode = { Ground: 0, Swing: 1, Air: 2, WallCrawl: 3, WallRun: 4, Zip: 5 } as const;
+export const Mode = { Ground: 0, Swing: 1, Air: 2, WallCrawl: 3, WallRun: 4, Zip: 5, Sling: 6, Layout: 7 } as const;
 export type Mode = (typeof Mode)[keyof typeof Mode];
+/** air tricks (AnimInput.trick): what the flip rotates about and how the body is held */
+export const Trick = { Somersault: 0, Corkscrew: 1, FrontFlip: 2, BackFlip: 3, CorkscrewR: 4 } as const;
+export type Trick = (typeof Trick)[keyof typeof Trick];
 
 export interface AnimInput {
   mode: Mode;
@@ -32,6 +35,8 @@ export interface AnimInput {
   impact: number;
   /** web anchor (world) while swinging / zip target while zipping */
   anchor: THREE.Vector3 | null;
+  /** second anchor while charging a slingshot */
+  anchorRight: THREE.Vector3 | null;
   /** which hand holds the web: 0 = left, 1 = right */
   hand: 0 | 1;
   /** seconds since the web was fired */
@@ -40,9 +45,13 @@ export interface AnimInput {
   swingPhase: number;
   /** flip progress 0..1, or <0 when not flipping */
   flip: number;
-  /** which trick the flip is: 0 = front somersault, 1 = corkscrew (twist about the body axis) */
-  trick: number;
+  /** which trick the flip is (Trick): tucked somersault / backflip, corkscrew (twist about the body axis), spread front flip */
+  trick: Trick;
   dive: boolean;
+  /** gliding on the web wings (arms out) */
+  glide: boolean;
+  /** charged-jump crouch 0..1 (ground only): knees bent, arms swept back */
+  crouch: number;
   /** desired body up / forward (world, unit) */
   up: THREE.Vector3;
   fwd: THREE.Vector3;
@@ -117,10 +126,12 @@ const LOCO: [number, number, number][] = [
 ];
 /** frozen sample time (fraction) for the "rise" pose */
 const RISE_T = 0.42;
+/** frozen sample time (fraction) of the landing clip: the deepest crouch (charged jump) */
+const CROUCH_T = 0.3;
 
 /* ---------- procedural layers ---------- */
-const L = { swing: 0, flip: 1, spread: 2, dive: 3, aimL: 4, aimR: 5, crawl: 6, zip: 7, thwipL: 8, thwipR: 9 } as const;
-const NL = 10;
+const L = { swing: 0, flip: 1, spread: 2, dive: 3, aimL: 4, aimR: 5, crawl: 6, zip: 7, thwipL: 8, thwipR: 9, glide: 10, crouch: 11, sling: 12, layout: 13 } as const;
+const NL = 14;
 /** metres climbed per full crawl cycle (two hand placements) */
 const CRAWL_CYCLE = 1.35;
 
@@ -289,7 +300,7 @@ export class HeroAnimator {
     this.lt.fill(0);
 
     /* ---------- landing one-shots ---------- */
-    const landed = inp.mode === Mode.Ground && this.prevMode !== Mode.Ground;
+    const landed = inp.mode === Mode.Ground && this.prevMode !== Mode.Ground && this.prevMode !== Mode.Sling;
     if (landed) {
       const imp = inp.impact;
       let clip = -1;
@@ -325,6 +336,21 @@ export class HeroAnimator {
           this.wt[os] = k;
         }
       }
+      if (inp.crouch > 0.01) {
+        // charging a jump: hold the landing clip at its deepest crouch
+        const k = Math.min(1, inp.crouch);
+        for (let i = 0; i < NC; i++) this.wt[i] *= 1 - k;
+        this.wt[C.land] += k;
+        this.lt[L.crouch] = k;
+      }
+    } else if (inp.mode === Mode.Sling) {
+      this.wt[C.idle] = 1;
+      this.lt[L.sling] = 1;
+      this.lt[L.aimL] = this.lt[L.aimR] = 1;
+      this.lt[L.thwipL] = this.lt[L.thwipR] = 1;
+    } else if (inp.mode === Mode.Layout) {
+      this.wt[C.air] = 1;
+      this.lt[L.layout] = 1;
     } else if (inp.mode === Mode.WallRun) {
       cycle = this.setLocoTargets(inp.speed);
     } else if (inp.mode === Mode.WallCrawl) {
@@ -340,8 +366,13 @@ export class HeroAnimator {
       const rise = smooth(-3, 6, inp.vy);
       this.wt[C.rise] = rise;
       this.wt[C.fall] = 1 - rise;
-      if (inp.flip >= 0) this.lt[L.flip] = 1 - smooth(0.8, 1, inp.flip);
-      else if (inp.dive) this.lt[L.dive] = 1;
+      if (inp.flip >= 0) {
+        // the front flip is done stretched out (star), the others tucked
+        const hold = 1 - smooth(0.8, 1, inp.flip);
+        if (inp.trick === Trick.FrontFlip) this.lt[L.spread] = hold;
+        else this.lt[L.flip] = hold;
+      } else if (inp.dive) this.lt[L.dive] = 1;
+      else if (inp.glide) this.lt[L.glide] = 1;
       else this.lt[L.spread] = smooth(9, 22, -inp.vy);
     }
     // arm aim towards the anchor (web hand), fingers in the "thwip" shape
@@ -396,6 +427,7 @@ export class HeroAnimator {
       if (i === C.walk || i === C.jog || i === C.sprint) a.time = ((this.phase + this.footOff[i]) % 1) * d;
       else if (i === C.rise) a.time = RISE_T * d;
       else if (i === this.oneShot) a.time = Math.min(this.oneShotT, d - 0.01);
+      else if (i === C.land && inp.crouch > 0.01) a.time = CROUCH_T * d;
       else if (i === C.land || i === C.hardLand || i === C.roll) {
         /* fading out after its one-shot: hold */
       } else a.time = this.t % d;
@@ -445,8 +477,9 @@ export class HeroAnimator {
       const e = f < 0.5 ? 4 * f * f * f : 1 - Math.pow(-2 * f + 2, 3) / 2;
       this.flipAngle = e * Math.PI * 2;
     } else this.flipAngle = 0;
-    if (inp.trick === 1) rig.flip.quaternion.setFromAxisAngle(_x.set(0, 1, 0), this.flipAngle);
-    else rig.flip.quaternion.setFromAxisAngle(_x.set(1, 0, 0), this.flipAngle);
+    const tk = inp.trick;
+    if (tk === Trick.Corkscrew || tk === Trick.CorkscrewR) rig.flip.quaternion.setFromAxisAngle(_x.set(0, 1, 0), tk === Trick.CorkscrewR ? -this.flipAngle : this.flipAngle);
+    else rig.flip.quaternion.setFromAxisAngle(_x.set(1, 0, 0), tk === Trick.BackFlip ? -this.flipAngle : this.flipAngle);
     rig.root.updateMatrixWorld(true);
 
     /* ---------- procedural layers ---------- */
@@ -480,6 +513,20 @@ export class HeroAnimator {
       }
     }
 
+    // charged-jump crouch: arms swept back and out like a diver on the board, eyes up
+    const wcj = this.lw[L.crouch];
+    if (wcj > 0.01) {
+      for (let side = 0; side < 2; side++) {
+        const sg = side === 0 ? 1 : -1;
+        _dir.copy(U).multiplyScalar(-0.7).addScaledVector(S, 0.45 * sg).addScaledVector(F, -0.55);
+        aim(side === 0 ? b.upperarm_l : b.upperarm_r, side === 0 ? b.lowerarm_l : b.lowerarm_r, _dir.normalize(), wcj);
+        _dir.copy(U).multiplyScalar(-0.6).addScaledVector(S, 0.3 * sg).addScaledVector(F, -0.75);
+        aim(side === 0 ? b.lowerarm_l : b.lowerarm_r, side === 0 ? b.hand_l : b.hand_r, _dir.normalize(), wcj);
+      }
+      _dir.copy(U).multiplyScalar(0.8).addScaledVector(F, 0.6);
+      aim(b.neck_01, b.Head, _dir.normalize(), wcj * 0.7);
+    }
+
     // dive: arms swept back, legs together
     const wdv = this.lw[L.dive];
     if (wdv > 0.01) {
@@ -494,6 +541,26 @@ export class HeroAnimator {
         _dir.copy(U).multiplyScalar(-1).addScaledVector(F, -0.3);
         aim(side === 0 ? b.calf_l : b.calf_r, side === 0 ? b.foot_l : b.foot_r, _dir.normalize(), wdv);
       }
+    }
+
+    // web wings: arms straight out to the sides, a little swept back, legs
+    // together with the toes pointed, head up looking along the glide
+    const wgl = this.lw[L.glide];
+    if (wgl > 0.01) {
+      for (let side = 0; side < 2; side++) {
+        const left = side === 0;
+        const sg = left ? 1 : -1;
+        _dir.copy(S).multiplyScalar(0.95 * sg).addScaledVector(U, -0.12).addScaledVector(F, -0.12);
+        aim(left ? b.upperarm_l : b.upperarm_r, left ? b.lowerarm_l : b.lowerarm_r, _dir.normalize(), wgl);
+        _dir.copy(S).multiplyScalar(0.95 * sg).addScaledVector(U, -0.2).addScaledVector(F, -0.08);
+        aim(left ? b.lowerarm_l : b.lowerarm_r, left ? b.hand_l : b.hand_r, _dir.normalize(), wgl);
+        _dir.copy(U).multiplyScalar(-1).addScaledVector(S, 0.08 * sg).addScaledVector(F, -0.06);
+        aim(left ? b.thigh_l : b.thigh_r, left ? b.calf_l : b.calf_r, _dir.normalize(), wgl);
+        _dir.copy(U).multiplyScalar(-1).addScaledVector(F, -0.18);
+        aim(left ? b.calf_l : b.calf_r, left ? b.foot_l : b.foot_r, _dir.normalize(), wgl);
+      }
+      _dir.copy(U).multiplyScalar(0.75).addScaledVector(F, -0.5);
+      aim(b.neck_01, b.Head, _dir.normalize(), wgl * 0.7);
     }
 
     // wall crawl: frog-legged diagonal gait (left hand + right foot, then the
@@ -600,11 +667,34 @@ export class HeroAnimator {
       }
     }
 
+    // Slingshot crouch, then a long, untucked body on release.
+    const ws = this.lw[L.sling];
+    const wlo = this.lw[L.layout];
+    if (ws > 0.01 || wlo > 0.01) {
+      const weight = Math.min(1, ws + wlo);
+      const crouch = ws / (ws + wlo);
+      for (let side = 0; side < 2; side++) {
+        const left = side === 0;
+        const sg = left ? 1 : -1;
+        _dir.copy(U).multiplyScalar(-1 + crouch * 0.7).addScaledVector(F, crouch * 0.9).addScaledVector(S, 0.12 * sg);
+        aim(left ? b.thigh_l : b.thigh_r, left ? b.calf_l : b.calf_r, _dir.normalize(), weight);
+        _dir.copy(U).multiplyScalar(-1).addScaledVector(F, -crouch * 0.95);
+        aim(left ? b.calf_l : b.calf_r, left ? b.foot_l : b.foot_r, _dir.normalize(), weight);
+        if (wlo > 0.01) {
+          _dir.copy(U).multiplyScalar(-0.8).addScaledVector(S, 0.5 * sg);
+          aim(left ? b.upperarm_l : b.upperarm_r, left ? b.lowerarm_l : b.lowerarm_r, _dir.normalize(), wlo);
+          _dir.copy(U).negate().addScaledVector(S, 0.2 * sg);
+          aim(left ? b.lowerarm_l : b.lowerarm_r, left ? b.hand_l : b.hand_r, _dir.normalize(), wlo);
+        }
+      }
+    }
+
     // web arm: straight line from the shoulder to the anchor, with a short
     // bent-arm anticipation right after firing
     for (let h = 0; h < 2; h++) {
       const wa = this.lw[h === 0 ? L.aimL : L.aimR];
-      if (wa <= 0.01 || !inp.anchor) {
+      const anchor = h === 1 && inp.anchorRight ? inp.anchorRight : inp.anchor;
+      if (wa <= 0.01 || !anchor) {
         for (const k of h === 0 ? AIM_L : AIM_R) sp[k].init = false;
         continue;
       }
@@ -613,7 +703,7 @@ export class HeroAnimator {
       const ha = h === 0 ? b.hand_l : b.hand_r;
       const fi = h === 0 ? b.middle_01_l : b.middle_01_r;
       ua.getWorldPosition(_p0);
-      _dir.copy(inp.anchor).sub(_p0).normalize();
+      _dir.copy(anchor).sub(_p0).normalize();
       const ext = inp.mode === Mode.Swing ? smooth(0.0, 0.16, inp.webT) : 1;
       // anticipation: elbow bent, forearm pointing up the rope
       _dir2.copy(_dir).multiplyScalar(0.6).addScaledVector(F, 0.35).addScaledVector(U, -0.25).normalize();
@@ -625,7 +715,7 @@ export class HeroAnimator {
 
     // flip: tight tuck (corkscrew: long body, arms crossed on the chest)
     const wfl = this.lw[L.flip];
-    if (wfl > 0.01 && inp.trick === 1) {
+    if (wfl > 0.01 && (inp.trick === Trick.Corkscrew || inp.trick === Trick.CorkscrewR)) {
       for (let side = 0; side < 2; side++) {
         const left = side === 0;
         const sg = left ? 1 : -1;
