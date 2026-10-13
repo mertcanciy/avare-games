@@ -322,7 +322,7 @@ export default function PlayShell({ game }: { game: GameInfo }) {
 
 function ControlsList({ game, className = "" }: { game: GameInfo; className?: string }) {
   return (
-    <ul className={`grid max-h-[calc(100dvh-7.5rem)] gap-2 overflow-y-auto ${className}`}>
+    <ul className={`grid gap-2 ${className}`}>
       {game.controls.map((c) => (
         <li key={c.label} className="flex items-center gap-3 text-[14px] text-ink">
           <Keys keys={c.keys} />
@@ -335,7 +335,7 @@ function ControlsList({ game, className = "" }: { game: GameInfo; className?: st
 
 function ControlsCard({ game, className = "" }: { game: GameInfo; className?: string }) {
   return (
-    <div className={`rounded-[18px] border border-line bg-paper/95 p-4 ${className}`}>
+    <div className={`max-h-[calc(100dvh-7.5rem)] overflow-y-auto rounded-[18px] border border-line bg-paper/95 p-4 ${className}`}>
       <p className="mb-3 text-[13px] leading-[1.45] text-muted-ink">{game.goal}</p>
       <ControlsList game={game} />
     </div>
