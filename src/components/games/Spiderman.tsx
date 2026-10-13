@@ -2174,7 +2174,7 @@ export default function Spiderman({ started }: { started: boolean }) {
         </div>
       )}
       {hud.bannerId > 0 && <HudBanner keyId={hud.bannerId} text={hud.bannerText} accent="#0284c7" />}
-      {started && !hud.locked && hud.slingCharge < 0 && <HudCenter text="Tıkla: fare ile bak · Space / Sol tık: basılı ağ at, kısa zıpla · Shift + Space: güçlü sıçra · Q / Sağ tık: zip · C: sapan · F basılı: kanat" />}
+      {started && !hud.locked && hud.slingCharge < 0 && <HudCenter text="Tıkla: fare ile bak · Space: basılı ağ, kısa zıpla · Shift+Space: sıçra · Q: zip · C: sapan · F: kanat · T: numara" />}
       {started && hud.slingCharge >= 0 && (
         <HudCenter
           text={`Sapan %${hud.slingCharge} · ${hud.slingCharge < 17 ? "Hazırlanıyor…" : "Bırak: fırla"} · Yön tuşu / Ağ: iptal`}

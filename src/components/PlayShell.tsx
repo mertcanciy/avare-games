@@ -322,7 +322,7 @@ export default function PlayShell({ game }: { game: GameInfo }) {
 
 function ControlsList({ game, className = "" }: { game: GameInfo; className?: string }) {
   return (
-    <ul className={`grid gap-2 ${className}`}>
+    <ul className={`grid max-h-[calc(100dvh-7.5rem)] gap-2 overflow-y-auto ${className}`}>
       {game.controls.map((c) => (
         <li key={c.label} className="flex items-center gap-3 text-[14px] text-ink">
           <Keys keys={c.keys} />
