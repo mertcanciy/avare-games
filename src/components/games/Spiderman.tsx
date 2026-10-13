@@ -835,10 +835,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
     s.onGround = false;
     s.facing = s.camYaw + Math.PI;
     s.shake = Math.min(1, s.shake + 0.15 + 0.3 * k);
-    if (k > 0.7) {
-      s.flipT = 0;
-      s.trick = 0;
-    }
+    if (k > 0.7) startFlip(Trick.Somersault, false);
     for (let i = 0; i < 10; i++) {
       const a2 = (i / 10) * Math.PI * 2;
       _tmp2.set(Math.cos(a2) * 4, 0.8 + k, Math.sin(a2) * 4);
@@ -1486,6 +1483,7 @@ function SpidermanScene({ started, onHud }: { started: boolean; onHud: (h: Hud) 
             banner("Düştün!");
           } else bankStyle();
           s.flipT = -1;
+          s.trickManual = false;
         }
         s.onGround = true;
         s.airTime = 0;
